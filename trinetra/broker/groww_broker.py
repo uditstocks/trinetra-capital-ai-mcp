@@ -8,7 +8,8 @@ re-authentication retry.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from trinetra.broker.base import (
     Broker,
@@ -45,11 +46,14 @@ class GrowwBroker(Broker):
     name = "groww"
     mode = "live"
 
-    def __init__(self, ctx=None) -> None:
+    def __init__(self, ctx=None, client=None) -> None:
         super().__init__(ctx)
-        # Fail fast & loudly if credentials are missing — we are about to trade
-        # real money.
-        self._client = groww_client.get_client()
+        # A client passed in belongs to ONE user, built from their own vaulted
+        # credentials. A client we build ourselves comes from process
+        # configuration and belongs to whoever runs the process — the CLI case.
+        # The two must never be confused: see _call.
+        self._user_scoped = client is not None
+        self._client = client if client is not None else groww_client.get_client()
 
     # ------------------------------------------------------------------ #
     # low-level call wrapper with one auth-refresh retry
@@ -62,15 +66,33 @@ class GrowwBroker(Broker):
         try:
             return invoke(self._client)
         except Exception as exc:  # noqa: BLE001
-            if _is_auth_error(exc):
-                log.warning("Groww session expired — re-authenticating once…")
-                groww_client.reset_client()
-                self._client = groww_client.get_client(force_refresh=True)
-                try:
-                    return invoke(self._client)
-                except Exception as exc2:  # noqa: BLE001
-                    raise BrokerError(f"Groww {fn_name} failed after re-auth: {exc2}") from exc2
-            raise BrokerError(f"Groww {fn_name} failed: {exc}") from exc
+            if not _is_auth_error(exc):
+                raise BrokerError(f"Groww {fn_name} failed: {exc}") from exc
+
+            if self._user_scoped:
+                # NEVER re-authenticate from process configuration here. Those are
+                # the operator's credentials, and retrying on them would place
+                # this user's order on the operator's brokerage account and then
+                # serve the operator's holdings back as if they were the user's.
+                # Their session simply has to be renewed by them.
+                from trinetra.broker import registry
+
+                registry.forget(self.ctx, "groww")
+                raise BrokerError(
+                    "Your Groww session is no longer valid — Groww access tokens "
+                    "expire daily. Use link_broker to reconnect your Groww account, "
+                    "then try again. No order was placed."
+                ) from exc
+
+            # Single-user CLI: the process config *is* this user's config, so a
+            # transparent re-auth is correct.
+            log.warning("Groww session expired — re-authenticating once…")
+            groww_client.reset_client()
+            self._client = groww_client.get_client(force_refresh=True)
+            try:
+                return invoke(self._client)
+            except Exception as exc2:  # noqa: BLE001
+                raise BrokerError(f"Groww {fn_name} failed after re-auth: {exc2}") from exc2
 
     def _const(self, prefix: str, value: str) -> str:
         """Resolve a Groww SDK constant (e.g. EXCHANGE_NSE) defensively, falling
@@ -88,7 +110,10 @@ class GrowwBroker(Broker):
         if reference_price is None and req.order_type in ("MARKET", "SL_M"):
             from trinetra import market_data  # lazy: avoids import cycle
 
-            reference_price = market_data.try_ltp(req.trading_symbol)
+            # Qualify with the exchange — an unqualified symbol resolves to the
+            # default (NSE), so a BSE order could be capped against the wrong
+            # instrument's price.
+            reference_price = market_data.try_ltp(f"{req.exchange}_{req.trading_symbol}")
         self.guard_order(req, reference_price)
 
         order_type_const = {

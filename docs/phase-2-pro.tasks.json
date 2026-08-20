@@ -1,0 +1,265 @@
+{
+  "project": "Trinetra Capital AI — MCP",
+  "phase": "2 — PRO",
+  "goal": "A user connects Trinetra by URL (no install), logs in, links a real Groww or Zerodha account through a secure page we host, activates live mode, and places a real order.",
+  "ships_in_three_stages": {
+    "2A": "Remote + multi-user, still paper. Users connect by URL and log in. Demoable on its own and de-risks everything after it.",
+    "2B": "Credential vault + secure broker linking + Groww live orders behind activation gates.",
+    "2C": "Zerodha adapter, reconciliation, and a real-money end-to-end test."
+  },
+  "global_rules": [
+    "Phase 1 safety invariants still hold: paper by default, two-step orders, fail-closed cap, audit before broker call, tool text is data not instruction.",
+    "Broker credentials never appear in chat, logs, tool output, error messages or tracebacks.",
+    "Every tool call resolves user -> account -> broker from the database. No process-global state.",
+    "Live mode requires its own explicit activation, separate from linking a broker.",
+    "The local stdio server must keep working — it is the dev loop and the offline fallback.",
+    "Secrets come from the environment or a managed store, never from the repo.",
+    "One task = one reviewable commit. Write tests with each."
+  ],
+  "architecture_decisions": [
+    "Trinetra is an OAuth Resource Server, not an Authorization Server. Auth is delegated to an external identity provider and tokens are checked via the MCP SDK's TokenVerifier. Building our own OAuth server is months of work and a large security surface for no product gain.",
+    "Transport is Streamable HTTP (FastMCP `streamable_http_path`). SSE is legacy; stdio stays for local use.",
+    "Broker credentials are entered on a page we host, reached by a one-time signed link returned from a tool — never typed into the chat box.",
+    "Groww (TOTP) and Zerodha (browser redirect) have different login shapes, so the link flow is built to handle both from the start rather than being retrofitted."
+  ],
+  "tasks": [
+    {
+      "id": "P2-00",
+      "title": "Compliance gate — BLOCKING, not code",
+      "stage": "gate",
+      "depends_on": [],
+      "prompt": "Get written answers before any Phase 2 engineering starts. 1) Do Groww's API terms permit operating a multi-user service on individually-issued keys, or is that partner-only? 2) Same question for Zerodha Kite Connect. 3) Does SEBI's retail algo-trading framework require exchange registration and an algo ID when routing orders on behalf of other users? 4) Decide the product's positioning: execution-only ('do what the user explicitly instructed') or advisory ('we recommend buy/sell') — the second may implicate SEBI RA/IA registration. Record each answer with its source.",
+      "acceptance": [
+        "All four answered in writing, with sources.",
+        "If any answer forbids the current design, the architecture is revised BEFORE P2-07 (credential vault) and P2-12 (Zerodha)."
+      ],
+      "blocking": true
+    },
+    {
+      "id": "P2-01",
+      "title": "Postgres schema and data layer",
+      "stage": "2A",
+      "depends_on": ["P2-00"],
+      "files": ["trinetra/db/", "migrations/"],
+      "prompt": "Design and migrate the schema: users, accounts, broker_links, orders, audit_events, and a table for live-mode limits/state. Add a migration tool (Alembic) and a repository layer that the services call. Keep the file-backed store working behind the same interface so the local stdio server still runs without a database.",
+      "acceptance": [
+        "Migrations run clean from empty on a fresh database.",
+        "Local stdio mode still works with no Postgres present.",
+        "Every table has the user_id foreign key and an index for the queries actually issued."
+      ]
+    },
+    {
+      "id": "P2-02",
+      "title": "Resolve SessionContext from the database",
+      "stage": "2A",
+      "depends_on": ["P2-01"],
+      "files": ["trinetra/session.py", "trinetra_mcp/runtime.py"],
+      "prompt": "Replace context_for_user's filesystem lookup with a database-backed resolution keyed by the authenticated identity. Trading mode, caps and broker choice all come from the user's account row. Keep the signature so nothing downstream changes; this is the seam Phase 1 was built around.",
+      "acceptance": [
+        "Two concurrent requests for different users never share broker or portfolio state.",
+        "Trading mode still comes from persisted state, never a tool argument.",
+        "Phase 1 tests pass unchanged against the file-backed path."
+      ]
+    },
+    {
+      "id": "P2-03",
+      "title": "Streamable HTTP transport",
+      "stage": "2A",
+      "depends_on": ["P2-02"],
+      "files": ["trinetra_mcp/server.py", "trinetra_mcp/app.py"],
+      "prompt": "Add a Streamable HTTP entrypoint alongside stdio, using FastMCP's streamable_http_app(). Decide and document stateless vs stateful (stateless scales horizontally; stateful is needed if you keep per-session server state). Add a health endpoint for the platform's checks. Choose transport by config, not by a code fork.",
+      "acceptance": [
+        "The same tool surface is reachable over HTTP and stdio, from one registration.",
+        "Health endpoint returns readiness including database connectivity.",
+        "Confirmation tokens work correctly under the chosen statefulness model."
+      ]
+    },
+    {
+      "id": "P2-04",
+      "title": "OAuth — Resource Server against an external IdP",
+      "stage": "2A",
+      "depends_on": ["P2-03"],
+      "files": ["trinetra_mcp/auth.py"],
+      "prompt": "Implement the MCP SDK's TokenVerifier to validate access tokens issued by the chosen identity provider (JWKS signature, issuer, audience, expiry, required scopes). Wire AuthSettings with issuer_url and resource_server_url, and serve the protected-resource metadata the MCP spec requires so hosts can discover the authorization server. Map a verified token to a user row, creating one on first login. Reject unauthenticated calls before any tool executes.",
+      "acceptance": [
+        "An expired, wrong-audience, wrong-issuer or tampered token is rejected.",
+        "A first-time login provisions a user and a paper account automatically.",
+        "No tool body runs for an unauthenticated request.",
+        "Protected-resource metadata is discoverable at the spec's well-known path."
+      ]
+    },
+    {
+      "id": "P2-05",
+      "title": "Deploy",
+      "stage": "2A",
+      "depends_on": ["P2-04"],
+      "files": ["Dockerfile", "docs/DEPLOY.md"],
+      "prompt": "Containerise the HTTP server and deploy it to the chosen host with managed Postgres, TLS on a real domain, environment-based secrets, and migrations run on release. Document rollback. Keep the image lean — the MCP path needs none of the LangChain stack.",
+      "acceptance": [
+        "Public HTTPS URL serving the MCP endpoint.",
+        "Secrets come from the platform, and none are present in the image or repo.",
+        "A rollback to the previous release is tested, not assumed."
+      ]
+    },
+    {
+      "id": "P2-06",
+      "title": "Verify remote connect end to end",
+      "stage": "2A",
+      "depends_on": ["P2-05"],
+      "files": ["tests/test_remote_e2e.py", "docs/INSTALL_MCP.md"],
+      "prompt": "Connect the deployed URL from Claude (desktop and web) and from ChatGPT, complete the login, and run the full Phase 1 journey against the hosted server: setup, analyze, preview, confirm, portfolio. Add an automated test that drives the HTTP transport with a signed test token. Rewrite the install doc around 'paste this URL' and keep the local-install section as the developer path.",
+      "acceptance": [
+        "Two different real accounts see completely separate portfolios.",
+        "Full journey verified in at least Claude; ChatGPT result documented either way.",
+        "Automated HTTP-transport test passes in CI."
+      ],
+      "milestone": "Stage 2A ships: users connect by URL and paper trade. No broker credentials involved yet."
+    },
+    {
+      "id": "P2-07",
+      "title": "Credential vault",
+      "stage": "2B",
+      "depends_on": ["P2-06"],
+      "files": ["trinetra/vault.py"],
+      "prompt": "Store broker credentials with envelope encryption: a per-user data key encrypted by a master key held in a managed KMS or secret store. Encrypt at rest, decrypt only in memory at the moment of a broker call, and support key rotation. Add a repr/serialisation guard so a credential object can never be logged, printed or returned from a tool, even accidentally.",
+      "acceptance": [
+        "Credentials are unreadable in a database dump.",
+        "A test asserts that logging or serialising a credential object yields no secret material.",
+        "Key rotation re-wraps existing records without downtime.",
+        "Nothing decrypts outside the broker call path."
+      ]
+    },
+    {
+      "id": "P2-08",
+      "title": "Secure broker-linking page",
+      "stage": "2B",
+      "depends_on": ["P2-07"],
+      "files": ["trinetra_web/", "trinetra_mcp/tools.py"],
+      "prompt": "Add a link_broker tool that returns a one-time, short-TTL signed URL to a page we host — and returns nothing else, no fields for credentials. On that page the user picks their broker and enters credentials directly, over TLS, never through the chat. Build it to fit both shapes from the start: Groww's TOTP secret and Zerodha's browser redirect. Add unlink, and a status tool that reports link state without revealing anything sensitive.",
+      "acceptance": [
+        "No tool accepts a credential as an argument, and no tool response contains one.",
+        "The link URL is single-use, expires, and is bound to the requesting user.",
+        "Both a form flow and a redirect flow are supported by the same mechanism.",
+        "Unlink revokes and deletes stored credentials."
+      ]
+    },
+    {
+      "id": "P2-09",
+      "title": "Broker registry and per-user live broker",
+      "stage": "2B",
+      "depends_on": ["P2-08"],
+      "files": ["trinetra/broker/__init__.py", "trinetra/broker/registry.py"],
+      "prompt": "Turn get_broker into a registry lookup keyed by the user's linked broker, constructing it with credentials pulled from the vault for that call. Cache per user with a bounded TTL, never process-wide. Adding a third broker must mean registering an adapter, not editing the factory.",
+      "acceptance": [
+        "Two users on different brokers are served correctly and concurrently.",
+        "A user with no link gets a clear 'link your broker' response, not an exception.",
+        "Broker instances and their credentials do not outlive their TTL."
+      ]
+    },
+    {
+      "id": "P2-10",
+      "title": "Live-mode gates and kill switch",
+      "stage": "2B",
+      "depends_on": ["P2-09"],
+      "files": ["trinetra/limits.py", "trinetra_mcp/tools.py"],
+      "prompt": "Activating live is a separate, explicit step after linking — linking a broker must never by itself enable real orders. Enforce per-user limits server-side: per-order cap, daily notional, daily order count. Add a kill switch that disables live instantly for a user and that the user can trigger themselves, plus an operator-level switch that disables live globally. Enforce all of it in the service layer, so no tool can bypass it.",
+      "acceptance": [
+        "Linking a broker leaves the account in paper mode.",
+        "Each limit is enforced and independently tested.",
+        "The kill switch takes effect on the very next call, with no restart.",
+        "The order preview states plainly when real money is involved."
+      ]
+    },
+    {
+      "id": "P2-11",
+      "title": "Immutable audit log",
+      "stage": "2B",
+      "depends_on": ["P2-10"],
+      "files": ["trinetra/audit.py"],
+      "prompt": "Move the append-only file audit into Postgres: append-only table, no update or delete grants for the application role, hash-chained rows so tampering is detectable. Record who, when, which account and broker, the exact parameters, and the broker's response — for preview, confirm, reject and fail alike. Add a query path that can answer 'what happened to this user's order' quickly.",
+      "acceptance": [
+        "The application role cannot update or delete audit rows.",
+        "A modified row is detectable via the hash chain.",
+        "Every order path writes an event before the broker call.",
+        "No credential or token material is ever written to the log."
+      ],
+      "milestone": "Stage 2B ships: real Groww orders, behind linking + activation + limits."
+    },
+    {
+      "id": "P2-12",
+      "title": "Zerodha adapter",
+      "stage": "2C",
+      "depends_on": ["P2-11"],
+      "files": ["trinetra/broker/zerodha_broker.py"],
+      "prompt": "Implement the existing Broker ABC for Kite Connect: orders, holdings, positions, funds, order status and history, normalised into the same dataclasses so nothing above the broker layer changes. Map Kite's product and order-type vocabulary onto ours. Handle session expiry the way GrowwBroker does. Zerodha uses its own instrument master — resolve symbols against the right one per broker.",
+      "acceptance": [
+        "The Phase 1 broker contract tests pass against Zerodha with the SDK mocked.",
+        "Symbols resolve against the correct instrument master per broker.",
+        "The safety cap and every limit apply identically to Zerodha orders."
+      ]
+    },
+    {
+      "id": "P2-13",
+      "title": "Kite redirect login in the link flow",
+      "stage": "2C",
+      "depends_on": ["P2-12"],
+      "files": ["trinetra_web/", "trinetra/vault.py"],
+      "prompt": "Complete Kite Connect's redirect login: send the user to Kite, receive the request token on our callback, exchange it for an access token, and vault it. Handle daily token expiry with a clear re-link prompt rather than a silent failure. Validate state to prevent CSRF on the callback.",
+      "acceptance": [
+        "A user links Zerodha end to end without any credential passing through chat.",
+        "An expired daily token produces an actionable 're-link' message, not a crash.",
+        "The callback rejects a mismatched or missing state parameter."
+      ]
+    },
+    {
+      "id": "P2-14",
+      "title": "Reconciliation",
+      "stage": "2C",
+      "depends_on": ["P2-13"],
+      "files": ["trinetra/reconcile.py"],
+      "prompt": "Add a periodic job that re-reads order status and holdings from each linked broker and reconciles them with our records, so an order that filled, partially filled or was rejected broker-side is never silently stale. Flag divergences loudly. Make order submission idempotent so a retry cannot double-place.",
+      "acceptance": [
+        "A simulated broker-side status change is detected and reconciled.",
+        "A divergence raises an alert rather than being silently overwritten.",
+        "Replaying a submission with the same idempotency key places exactly one order."
+      ]
+    },
+    {
+      "id": "P2-15",
+      "title": "Real-money end-to-end test",
+      "stage": "2C",
+      "depends_on": ["P2-14"],
+      "files": ["docs/PHASE2_SIGNOFF.md"],
+      "prompt": "The founder links their own real account, activates live with the smallest possible cap, and places one real order of one share end to end through a hosted AI host. Verify the fill against the broker's own app, verify the audit trail, then test the kill switch mid-session. Record everything, including anything that behaved unexpectedly.",
+      "acceptance": [
+        "One real order placed and confirmed against the broker's own records.",
+        "Audit trail complete and matching.",
+        "Kill switch verified to stop live trading immediately.",
+        "Signoff document written, including known gaps carried into Phase 3."
+      ],
+      "milestone": "Stage 2C ships: Phase 2 complete. Hardening and scale are Phase 3."
+    }
+  ],
+  "risks": [
+    {
+      "risk": "Broker terms forbid multi-user operation on individually-issued API keys",
+      "impact": "Reshapes the whole product — could force a partner/empanelment route or a bring-your-own-key model",
+      "mitigation": "P2-00 answers this before any vault or adapter work is written"
+    },
+    {
+      "risk": "Credential breach",
+      "impact": "Severe — real brokerage accounts, not just data",
+      "mitigation": "Envelope encryption, KMS-held master key, no plaintext at rest, decrypt only in the broker call path, unloggable credential objects, rotation"
+    },
+    {
+      "risk": "Host AI confirms an order the user never approved",
+      "impact": "Real money moves without consent",
+      "mitigation": "Two-step tokens stay, plus server-side limits and kill switch that no tool call can bypass"
+    },
+    {
+      "risk": "ChatGPT's remote-MCP support differs from Claude's",
+      "impact": "One host may not work at launch",
+      "mitigation": "Build to spec, verify both at P2-06, document per-host reality honestly"
+    }
+  ]
+}

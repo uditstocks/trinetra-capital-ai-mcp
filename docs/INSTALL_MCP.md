@@ -88,7 +88,7 @@ show my portfolio
 how much profit have I booked?
 ```
 
-The first message creates a paper account with ₹10,00,000 in virtual cash.
+The first message creates a paper account with ₹1,00,000 in virtual cash.
 **Prices and analysis are real and live — only the money is simulated.**
 
 Buying takes two steps on purpose: your AI shows you a preview (symbol, quantity,

@@ -129,7 +129,7 @@ class Settings:
         default_factory=lambda: PROJECT_ROOT / ".groww_token_cache.json"
     )
     paper_starting_cash: float = field(
-        default_factory=lambda: _get_float("TRINETRA_PAPER_CASH", 1_000_000.0)
+        default_factory=lambda: _get_float("TRINETRA_PAPER_CASH", 100_000.0)
     )
 
     log_level: str = field(

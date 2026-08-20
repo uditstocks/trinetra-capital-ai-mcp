@@ -10,22 +10,45 @@ from __future__ import annotations
 from typing import Any
 
 
+def _grouped(value: float, decimals: int = 2) -> str:
+    """Indian digit grouping: 1,00,000 — last three, then pairs.
+
+    Western grouping reads wrong to anyone thinking in lakhs and crores, which is
+    everyone this product is for. Shared shape with charts._rupees so a number
+    looks identical in a table and on a chart.
+    """
+    text = f"{abs(value):.{decimals}f}"
+    whole, _, fraction = text.partition(".")
+    if len(whole) > 3:
+        head, tail = whole[:-3], whole[-3:]
+        pairs = []
+        while len(head) > 2:
+            pairs.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            pairs.insert(0, head)
+        whole = ",".join([*pairs, tail])
+    return whole + (f".{fraction}" if fraction else "")
+
+
 def _money(x: Any) -> str:
     if x is None:
         return "—"
     try:
-        return f"₹{float(x):,.2f}"
+        v = float(x)
     except (TypeError, ValueError):
         return "—"
+    return f"{'−' if v < 0 else ''}₹{_grouped(v)}"
 
 
 def _num(x: Any) -> str:
     if x is None:
         return "—"
     try:
-        return f"{float(x):,.2f}"
+        v = float(x)
     except (TypeError, ValueError):
         return "—"
+    return f"{'−' if v < 0 else ''}{_grouped(v)}"
 
 
 def _signed_money(x: Any) -> str:
@@ -35,7 +58,7 @@ def _signed_money(x: Any) -> str:
         v = float(x)
     except (TypeError, ValueError):
         return "—"
-    return f"{'+' if v >= 0 else '−'}₹{abs(v):,.2f}"
+    return f"{'+' if v >= 0 else '−'}₹{_grouped(v)}"
 
 
 def _signed_pct(x: Any) -> str:

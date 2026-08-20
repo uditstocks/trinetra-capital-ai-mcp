@@ -66,7 +66,11 @@ def _save_cached_token(token: str) -> None:
 
 
 def generate_access_token() -> str:
-    """Authenticate with Groww and return a fresh access token."""
+    """Authenticate with Groww from process configuration and return a token.
+
+    Single-user only — on a hosted server this would be the operator's account.
+    """
+    _refuse_global_on_hosted()
     try:
         from growwapi import GrowwAPI
     except ImportError as exc:
@@ -100,8 +104,68 @@ def generate_access_token() -> str:
         raise BrokerError(f"Groww authentication failed: {exc}") from exc
 
 
+def build_client(credentials, force_refresh: bool = False):
+    """An authenticated GrowwAPI for one user's own credentials.
+
+    The hosted path calls this with the bundle opened from the vault, so no
+    global config is consulted and two users never share a session. Tokens are
+    not cached to disk here — that cache is keyed by process, not by user, and
+    would leak one account's session into another's.
+    """
+    try:
+        from growwapi import GrowwAPI
+    except ImportError as exc:
+        raise BrokerError(
+            "The 'growwapi' package is not installed. Run: pip install growwapi pyotp"
+        ) from exc
+
+    api_key = credentials.require("api_key")
+    totp_secret = credentials.get("totp_secret")
+    api_secret = credentials.get("api_secret")
+    try:
+        if totp_secret:
+            import pyotp
+
+            token = GrowwAPI.get_access_token(
+                api_key=api_key, totp=pyotp.TOTP(totp_secret).now()
+            )
+        elif api_secret:
+            token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
+        else:
+            raise BrokerError(
+                "Stored Groww credentials have neither a TOTP secret nor an API secret."
+            )
+    except BrokerError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - normalise SDK/HTTP errors, never echo creds
+        raise BrokerError(f"Groww authentication failed: {type(exc).__name__}") from None
+    return GrowwAPI(token)
+
+
+def _refuse_global_on_hosted() -> None:
+    """The process-global client must not exist on a multi-tenant server.
+
+    It authenticates from environment configuration — the operator's own broker
+    account — and caches the session in a module global and a shared file. On a
+    server handling many users that is one account's session leaking into
+    everyone's requests. Hosted code paths build a client per user instead.
+    """
+    from trinetra import store
+
+    if store.database_url() is not None:
+        raise BrokerError(
+            "Refusing to use server-wide Groww credentials on a multi-user "
+            "deployment. Each user's broker session is built from their own "
+            "linked credentials."
+        )
+
+
 def get_client(force_refresh: bool = False):
-    """Return a ready-to-use, authenticated GrowwAPI instance (cached)."""
+    """Return a ready-to-use, authenticated GrowwAPI instance (cached).
+
+    Single-user only — see _refuse_global_on_hosted.
+    """
+    _refuse_global_on_hosted()
     global _client
     if _client is not None and not force_refresh:
         return _client

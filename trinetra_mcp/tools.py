@@ -15,8 +15,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from trinetra import session
+from mcp.server.fastmcp import Image
+
+from trinetra import charts, store
 from trinetra.config import TradingMode
+from trinetra.logging_setup import get_logger
 from trinetra.services import research as research_svc
 from trinetra.services import trading as trading_svc
 from trinetra_mcp.runtime import (
@@ -33,7 +36,86 @@ from trinetra_mcp.runtime import (
     require_account,
 )
 
+log = get_logger(__name__)
+
 ORDER_TYPES = ("market", "limit", "sl", "sl_m")
+
+WELCOME = {
+    "headline": "Trinetra Capital AI — research and trade Indian equities (NSE/BSE) "
+                "by just talking.",
+    "you_are_in": "Paper trading. Market data and analysis are real and live; only "
+                  "the money is simulated, so nothing here can lose you anything.",
+    "try_asking": [
+        "How does Infosys look right now?",
+        "What's the price of Reliance?",
+        "Buy 10 shares of HCL",
+        "Show my portfolio",
+        "How much profit have I booked?",
+    ],
+    "what_makes_it_different": "Analysis comes with its full reasoning — every "
+                               "indicator checked, what it read, and how it moved the "
+                               "score — plus a chart. You see the working, not just a "
+                               "verdict.",
+    "when_you_want_real_money": "Link your own Groww or Zerodha account (link_broker), "
+                                "then switch with switch_trading_mode('live'). Linking "
+                                "alone changes nothing — going live is a separate, "
+                                "deliberate step.",
+    "safety": [
+        "Orders take two steps: you see a priced preview, and nothing is placed "
+        "until you approve that exact order.",
+        "A per-order cap, a daily value cap and a daily order count — all enforced "
+        "on the server.",
+        "A kill switch stops live trading on the very next order.",
+        "Broker keys are entered on a secure page, never in this chat, and are "
+        "encrypted before storage.",
+    ],
+    "disclaimer": "Educational and personal-automation software. Not investment "
+                  "advice. Live trading risks real money and every order is the "
+                  "user's own responsibility.",
+}
+
+
+def _linked_broker(ctx) -> dict[str, Any] | None:
+    """The user's linked real broker, if this deployment supports linking."""
+    try:
+        from trinetra import brokerlink, store as store_mod
+
+        if store_mod.database_url() is None:
+            return None
+        return brokerlink.active_link(ctx)
+    except Exception:  # noqa: BLE001 - status must not fail over a decoration
+        return None
+
+
+def _is_new_account(ctx) -> bool:
+    """True for an account that has never traded.
+
+    Used to decide whether the user needs an introduction — a returning user does
+    not want the tour again.
+    """
+    try:
+        from trinetra.broker import get_broker
+
+        return not get_broker(ctx).get_order_history(limit=1)
+    except Exception:  # noqa: BLE001 - a greeting must never break a status call
+        return False
+
+
+def _with_chart(data: dict[str, Any], render) -> Any:
+    """Return the data with a rendered chart beside it, or the data alone.
+
+    Charting is a bonus on top of the numbers, so a rendering failure degrades to
+    the table rather than costing the user their portfolio.
+    """
+    if data.get("error") or data.get("status") == "not_set_up":
+        return data
+    try:
+        with quiet_stdout():
+            png = render()
+        return [data, Image(data=png, format="png")]
+    except Exception as exc:  # noqa: BLE001 - never fail a read over a picture
+        log.warning("Chart rendering failed: %s", exc)
+        return data
 
 LIVE_NOT_AVAILABLE = {
     "status": "unavailable",
@@ -71,8 +153,8 @@ def register(mcp) -> None:
 
         ctx = current_context()
         with quiet_stdout():
-            existed = session.account_exists(ctx)
-            record = session.create_account(ctx, TradingMode.PAPER)
+            existed = store.account_exists(ctx)
+            record = store.create_account(ctx, TradingMode.PAPER)
             funds = trading_svc.get_funds(ctx)
 
         return {
@@ -89,13 +171,14 @@ def register(mcp) -> None:
         }
 
     @mcp.tool()
-    def get_account_status() -> dict[str, Any]:
+    def get_account_status() -> Any:
         """Check whether this user has a Trinetra account, and report its mode,
         available cash and safety limits.
 
-        Call this at the start of a trading conversation, or whenever you are
-        unsure whether the user is set up. If it returns not_set_up, call
-        setup_account before any portfolio or order tool.
+        Call this at the START of any trading conversation. For a user who has
+        never traded it also returns a welcome card image and an `introduction` —
+        show the image and give them a short, warm orientation in your own words.
+        If it returns not_set_up, call setup_account first.
         """
         ctx = current_context()
         base = {
@@ -105,14 +188,16 @@ def register(mcp) -> None:
             "default_product": ctx.default_product,
         }
         with quiet_stdout():
-            record = session.load_account(ctx)
+            record = store.load_account(ctx)
             if record is None:
                 return {**base, "status": "not_set_up",
                         "next_step": "Call setup_account(mode='paper') to create a "
                                      "free paper account. No credentials needed."}
             funds = trading_svc.get_funds(ctx)
+            is_new = _is_new_account(ctx)
+            linked = _linked_broker(ctx)
 
-        return {
+        payload = {
             **base,
             "status": "ready",
             "mode": record.get("mode"),
@@ -120,7 +205,36 @@ def register(mcp) -> None:
             "available_cash": funds.get("available_cash"),
             "net_worth": funds.get("net"),
             "created_at": record.get("created_at"),
+            "linked_broker": linked,
         }
+        if is_new:
+            payload["is_new_user"] = True
+            payload["introduction"] = WELCOME
+            payload["next_step"] = (
+                "This user has never traded. Show them the welcome card image "
+                "returned alongside this, then introduce Trinetra warmly and briefly "
+                "in your own words using `introduction` — what it is, that they are "
+                "in paper mode with real live prices, two or three things worth "
+                "asking, and that their own broker can be connected later. Keep it "
+                "short and do not dump the JSON."
+            )
+        else:
+            payload["is_new_user"] = False
+            payload["next_step"] = (
+                "Show the status card image returned alongside this, then answer what "
+                "the user actually asked. They have used Trinetra before — do not "
+                "re-introduce the product."
+            )
+
+        # Everyone gets the card: it is their own mode, balance and broker at a
+        # glance, not a brochure. Only the written introduction is new-user only.
+        return _with_chart(payload, lambda: charts.welcome_card(
+            mode=payload.get("mode", "paper"),
+            available_cash=payload.get("available_cash"),
+            broker=(payload.get("linked_broker") or {}).get("label"),
+        ))
+
+        return payload
 
     # ----------------------------------------------------------------- #
     # market and research
@@ -173,7 +287,7 @@ def register(mcp) -> None:
             return research_svc.get_stock_snapshot(sym)
 
     @mcp.tool()
-    def analyze_stock(symbol: str) -> dict[str, Any]:
+    def analyze_stock(symbol: str, include_chart: bool = True) -> Any:
         """Run Trinetra's full technical and sentiment analysis on a stock and
         return a BUY / SELL / HOLD verdict with its complete reasoning.
 
@@ -187,6 +301,11 @@ def register(mcp) -> None:
         actual analysis. Do not substitute your own market commentary or invent
         factors that are not in it.
 
+        A price chart is returned alongside — 90 days of close with its Bollinger
+        envelope, the stop-loss and target levels marked, and RSI beneath. Show it
+        with your explanation. Pass include_chart=False when analysing many stocks
+        in one sweep, where a chart each would be noise.
+
         Use whenever the user asks "should I buy X?", "how does X look?", or wants
         an opinion on a stock. Always relay the disclaimer.
         """
@@ -195,13 +314,19 @@ def register(mcp) -> None:
         except ToolInputError as exc:
             return {"error": str(exc)}
         with quiet_stdout():
-            return research_svc.analyze_stock(sym)
+            data = research_svc.analyze_stock(sym, include_history=include_chart)
+        if not include_chart:
+            return data
+        history = data.pop("history", None)
+        if not history:
+            return data
+        return _with_chart(data, lambda: charts.analysis_chart(data, history))
 
     # ----------------------------------------------------------------- #
     # account
     # ----------------------------------------------------------------- #
     @mcp.tool()
-    def view_portfolio() -> dict[str, Any]:
+    def view_portfolio() -> Any:
         """Show the user's current portfolio: every holding with quantity, average
         buy price, live price, current value, unrealised P&L, allocation percentage
         and holding period — plus a summary of invested value, unrealised, booked
@@ -211,12 +336,16 @@ def register(mcp) -> None:
         or P&L. Always call it fresh — never answer from earlier in the
         conversation, because prices move. Present the `display` table verbatim;
         its numbers were computed, so restating them from memory risks errors.
+
+        Also returns a chart image showing holdings by value and unrealised P&L.
+        Show it to the user along with the table — do not describe it instead.
         """
         ctx = current_context()
         if (missing := require_account(ctx)) is not None:
             return missing
         with quiet_stdout():
-            return trading_svc.view_portfolio(ctx)
+            data = trading_svc.view_portfolio(ctx)
+        return _with_chart(data, lambda: charts.portfolio_chart(data))
 
     @mcp.tool()
     def get_funds() -> dict[str, Any]:
@@ -250,7 +379,7 @@ def register(mcp) -> None:
             return trading_svc.get_order_history(ctx, limit=count)
 
     @mcp.tool()
-    def get_performance() -> dict[str, Any]:
+    def get_performance() -> Any:
         """Show trading performance and booked P&L: total realised profit or loss
         to date, per-stock breakdown, win rate and trade counts, best and worst
         trades, fully closed positions, today's P&L, and sector allocation.
@@ -259,13 +388,14 @@ def register(mcp) -> None:
         net positive, or for their stats, track record or realised P&L. This is
         the tool that answers "am I actually up?" — view_portfolio only shows
         unrealised P&L on what they still hold. Present the `display` report
-        verbatim.
+        verbatim, along with the chart image returned beside it.
         """
         ctx = current_context()
         if (missing := require_account(ctx)) is not None:
             return missing
         with quiet_stdout():
-            return trading_svc.get_performance(ctx)
+            data = trading_svc.get_performance(ctx)
+        return _with_chart(data, lambda: charts.performance_chart(data))
 
     # ----------------------------------------------------------------- #
     # orders
@@ -335,7 +465,11 @@ def register(mcp) -> None:
         if result.get("status") != "preview":
             return result  # rejected — surface the reason to the user
 
-        token, ttl = issue_token(ctx.user_id, result["order"], result["preview"])
+        # The preview is only truthful for the mode it was priced in. Carrying
+        # the mode into the token lets confirm_order refuse a paper preview that
+        # is being confirmed after a switch to live, and vice versa.
+        result["order"]["mode"] = ctx.trading_mode.value
+        token, ttl = issue_token(ctx, result["order"], result["preview"])
         return {
             "status": "confirmation_required",
             "preview": result["preview"],
@@ -366,10 +500,21 @@ def register(mcp) -> None:
         except ToolInputError as exc:
             return {"status": "rejected", "error": str(exc)}
 
-        pending, error = redeem_token(token, ctx.user_id)
+        pending, error = redeem_token(ctx, token)
         if error is not None:
-            session.audit_order(ctx, "confirm_denied", {"reason": error["error"][:120]})
+            store.audit_order(ctx, "confirm_denied", {"reason": error["error"][:120]})
             return error
+
+        previewed_mode = pending["order"].get("mode")
+        if previewed_mode and previewed_mode != ctx.trading_mode.value:
+            store.audit_order(ctx, "confirm_denied", {"reason": "mode changed"})
+            return {
+                "status": "rejected",
+                "error": f"This order was previewed in {previewed_mode} mode, but the "
+                         f"account is now in {ctx.trading_mode.value} mode. Prices and "
+                         "consequences differ — call place_order again for a fresh "
+                         "preview and confirm that one.",
+            }
 
         with quiet_stdout():
             result = trading_svc.execute_order(ctx, pending["order"])

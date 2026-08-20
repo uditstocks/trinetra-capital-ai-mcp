@@ -100,15 +100,23 @@ class OrderRequest:
         )
 
     def estimated_value(self, reference_price: float | None = None) -> float:
-        """Best-effort notional value for the safety cap check."""
+        """Notional exposure, priced at the WORSE of the caller's price and market.
+
+        Taking the caller's price at face value understates a marketable limit and
+        lets it slip under every rupee cap: a SELL LIMIT at ₹1 on a ₹1,400 stock
+        prices as ₹1 per share but fills at ₹1,400, so 500 shares reads as ₹500
+        while liquidating ₹7,00,000. The same holds for a stop-loss whose trigger
+        sits far from market. Pricing at the maximum is correct in both
+        directions — a BUY never pays above its limit, and a SELL never receives
+        less than market for a marketable order.
+        """
         ot = self.order_type.strip().upper()
-        if ot in (LIMIT, SL) and self.price:
-            px = self.price
-        elif ot == SL_M and self.trigger_price:
-            px = self.trigger_price
-        else:
-            px = reference_price or 0.0
-        return round(self.quantity * (px or 0.0), 2)
+        candidates = [reference_price or 0.0]
+        if ot in (LIMIT, SL):
+            candidates.append(self.price or 0.0)
+        elif ot == SL_M:
+            candidates.append(self.trigger_price or 0.0)
+        return round(self.quantity * max(candidates), 2)
 
 
 @dataclass

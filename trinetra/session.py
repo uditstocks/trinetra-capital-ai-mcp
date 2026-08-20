@@ -1,38 +1,31 @@
-"""Per-user session context and storage.
+"""Per-user session context — who a call acts for, and under what limits.
 
-`settings` (trinetra/config.py) holds process-level defaults read from .env.
-Anything a *user* owns — trading mode, where their portfolio lives, their order
-cap — belongs here, so one process can serve more than one account.
+A pure value object. `settings` (trinetra/config.py) holds process-level defaults
+read from .env; anything a *user* owns — trading mode, their order cap, where
+their data lives — belongs here, so one process can serve many accounts.
 
-    CLI  -> default_context()          keeps the legacy root portfolio.json
-    MCP  -> context_for_user(user_id)  isolated under ~/.trinetra/users/<id>/
+    CLI / local MCP -> default_context(), context_for_user()
+    hosted MCP      -> context_for_principal(), built from the authenticated user
 
-Phase 2 (hosted, multi-tenant) replaces `context_for_user` and the read/write
-helpers with database-backed equivalents; their signatures stay the same.
+Persistence lives in trinetra/store.py, deliberately not here: the context says
+who you are, the store says where the bytes go.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-from trinetra.config import PROJECT_ROOT, TradingMode, settings
-from trinetra.logging_setup import get_logger
-
-log = get_logger(__name__)
+from trinetra.config import TradingMode, settings
 
 DEFAULT_USER_ID = "local"
-ACCOUNT_VERSION = 1
 _UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
 
 
 def data_root() -> Path:
-    """Root of all per-user data. Override with TRINETRA_DATA_DIR."""
+    """Root of all per-user data on the local backend. Override with TRINETRA_DATA_DIR."""
     override = os.getenv("TRINETRA_DATA_DIR")
     return Path(override).expanduser() if override else Path.home() / ".trinetra"
 
@@ -43,16 +36,9 @@ def safe_user_id(user_id: str) -> str:
     return cleaned or DEFAULT_USER_ID
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-# --------------------------------------------------------------------------- #
-# context
-# --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class SessionContext:
-    """Everything the broker and service layers need to act for one user."""
+    """Everything the broker and service layers need to act for one account."""
 
     user_id: str
     trading_mode: TradingMode
@@ -62,6 +48,10 @@ class SessionContext:
     default_product: str
     default_exchange: str
     paper_starting_cash: float
+    # Set on the hosted backend, where rows are keyed by database id rather than
+    # by a directory name. None on the local file backend.
+    account_id: str | None = None
+    broker_name: str = "paper"
 
     @property
     def is_live(self) -> bool:
@@ -103,7 +93,7 @@ def context_for_user(
     user_id: str = DEFAULT_USER_ID,
     trading_mode: TradingMode | None = None,
 ) -> SessionContext:
-    """Context for an MCP user, isolated in its own directory under the data root."""
+    """Context for a local MCP user, isolated in its own directory."""
     uid = safe_user_id(user_id)
     udir = data_root() / "users" / uid
     return SessionContext(
@@ -118,107 +108,34 @@ def context_for_user(
     )
 
 
-# --------------------------------------------------------------------------- #
-# account record
-# --------------------------------------------------------------------------- #
-def load_account(ctx: SessionContext) -> dict[str, Any] | None:
-    """The user's account record, or None if they have not been set up."""
-    if not ctx.account_file.exists():
-        return None
-    try:
-        data = json.loads(ctx.account_file.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("Could not read account record %s: %s", ctx.account_file, exc)
-        return None
+def context_for_account(
+    user_id: str,
+    account_id: str,
+    trading_mode: TradingMode,
+    max_order_value: float,
+    broker_name: str = "paper",
+    default_product: str | None = None,
+    default_exchange: str | None = None,
+    paper_starting_cash: float | None = None,
+) -> SessionContext:
+    """Context for a hosted user, built from their database row.
 
-
-def save_account(ctx: SessionContext, data: dict[str, Any]) -> dict[str, Any]:
-    ctx.data_dir.mkdir(parents=True, exist_ok=True)
-    data = {**data, "updated_at": _now()}
-    ctx.account_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return data
-
-
-def account_exists(ctx: SessionContext) -> bool:
-    return load_account(ctx) is not None
-
-
-def create_account(
-    ctx: SessionContext,
-    mode: TradingMode = TradingMode.PAPER,
-    starting_cash: float | None = None,
-) -> dict[str, Any]:
-    """Create (or return) the user's account record and storage directory."""
-    existing = load_account(ctx)
-    if existing is not None:
-        return existing
-
-    ctx.data_dir.mkdir(parents=True, exist_ok=True)
-    record = {
-        "version": ACCOUNT_VERSION,
-        "user_id": ctx.user_id,
-        "mode": mode.value,
-        "broker": "paper" if mode is TradingMode.PAPER else "groww",
-        "starting_cash": float(
-            starting_cash if starting_cash is not None else ctx.paper_starting_cash
+    The filesystem paths are still populated so the shape stays uniform, but the
+    database store never reads them.
+    """
+    udir = data_root() / "users" / safe_user_id(user_id)
+    return SessionContext(
+        user_id=user_id,
+        trading_mode=trading_mode,
+        portfolio_file=udir / "portfolio.json",
+        data_dir=udir,
+        max_order_value=max_order_value,
+        default_product=default_product or settings.default_product,
+        default_exchange=default_exchange or settings.default_exchange,
+        paper_starting_cash=(
+            paper_starting_cash if paper_starting_cash is not None
+            else settings.paper_starting_cash
         ),
-        "created_at": _now(),
-        "migrated_legacy_portfolio": import_legacy_portfolio(ctx),
-    }
-    log.info("Created %s account for user %s", mode.value, ctx.user_id)
-    return save_account(ctx, record)
-
-
-def import_legacy_portfolio(ctx: SessionContext) -> bool:
-    """Copy the repo-root portfolio.json into a brand-new user directory.
-
-    Opt-in via TRINETRA_IMPORT_LOCAL_PORTFOLIO=1, and off by default: a copy of
-    this project can carry someone else's portfolio.json, and a new user must
-    never silently inherit another person's positions.
-
-    Never overwrites an existing portfolio; failure is non-fatal.
-    """
-    if os.getenv("TRINETRA_IMPORT_LOCAL_PORTFOLIO", "").strip().lower() not in (
-        "1", "true", "yes", "on"
-    ):
-        return False
-
-    legacy = PROJECT_ROOT / "portfolio.json"
-    target = ctx.portfolio_file
-    if target.exists() or not legacy.exists() or legacy.resolve() == target.resolve():
-        return False
-    try:
-        trades = json.loads(legacy.read_text(encoding="utf-8"))
-        if not isinstance(trades, list) or not trades:
-            return False
-        ctx.data_dir.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(trades, indent=2), encoding="utf-8")
-        log.info("Imported %d legacy paper trades to %s", len(trades), target)
-        return True
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("Legacy portfolio import skipped: %s", exc)
-        return False
-
-
-# --------------------------------------------------------------------------- #
-# order audit log
-# --------------------------------------------------------------------------- #
-def audit_order(ctx: SessionContext, event: str, payload: dict[str, Any]) -> None:
-    """Append-only record of every order-affecting event.
-
-    Written before an order reaches the broker, so an attempt is on record even
-    if execution then fails. Never raises — auditing must not block a trade the
-    user has already authorised.
-    """
-    try:
-        ctx.data_dir.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(
-            {"ts": _now(), "user_id": ctx.user_id, "event": event,
-             "mode": ctx.trading_mode.value, **payload},
-            default=str,
-        )
-        with ctx.audit_file.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except OSError as exc:
-        log.warning("Could not write audit record: %s", exc)
+        account_id=account_id,
+        broker_name=broker_name,
+    )

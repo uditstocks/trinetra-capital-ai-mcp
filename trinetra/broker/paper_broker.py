@@ -11,7 +11,6 @@ before flipping GROWW_TRADING_MODE=live.
 
 from __future__ import annotations
 
-import json
 from datetime import date, datetime
 from typing import Any
 
@@ -25,6 +24,7 @@ from trinetra.broker.base import (
     Position,
 )
 from trinetra.logging_setup import get_logger
+from trinetra.store import get_store
 
 log = get_logger(__name__)
 
@@ -37,19 +37,10 @@ class PaperBroker(Broker):
     # trade-log persistence
     # ------------------------------------------------------------------ #
     def _load(self) -> list[dict[str, Any]]:
-        path = self.ctx.portfolio_file
-        if not path.exists():
-            return []
-        try:
-            data = json.loads(path.read_text())
-            return data if isinstance(data, list) else []
-        except (json.JSONDecodeError, OSError) as exc:
-            log.warning("Could not read %s: %s", path, exc)
-            return []
+        return get_store(self.ctx).load_trades()
 
     def _save(self, trades: list[dict[str, Any]]) -> None:
-        self.ctx.portfolio_file.parent.mkdir(parents=True, exist_ok=True)
-        self.ctx.portfolio_file.write_text(json.dumps(trades, indent=2))
+        get_store(self.ctx).save_trades(trades)
 
     # ------------------------------------------------------------------ #
     # orders

@@ -16,6 +16,9 @@ yfinance
 # yfinance needs websockets >=13 (websockets.asyncio).
 websockets>=14,<17
 
+# --- Charts (PNGs returned alongside the numbers) ---
+matplotlib
+
 # --- Technical + sentiment analysis ---
 numpy
 pandas

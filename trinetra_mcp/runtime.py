@@ -25,9 +25,21 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from trinetra import session
+from mcp.server.auth.middleware.auth_context import get_access_token
+
+from trinetra import store
 from trinetra.config import TradingMode
-from trinetra.session import DEFAULT_USER_ID, SessionContext, context_for_user
+from trinetra.session import (
+    DEFAULT_USER_ID,
+    SessionContext,
+    context_for_account,
+    context_for_user,
+)
+
+
+class NotAuthenticated(RuntimeError):
+    """Raised when a hosted request carries no verified identity."""
+
 
 # --------------------------------------------------------------------------- #
 # session
@@ -37,17 +49,65 @@ def current_user_id() -> str:
 
 
 def current_context() -> SessionContext:
-    """Session context for this process's user, with the persisted trading mode."""
+    """The account this call acts for.
+
+    Hosted: the verified token's subject, resolved to a database account.
+    Local:  the process's user id, backed by files.
+
+    Fails closed. If a database is configured we are running hosted, so an
+    unauthenticated call is refused rather than falling back to the shared local
+    account — that fallback would hand an anonymous caller someone's portfolio.
+    """
+    token = get_access_token()
+    if token is not None:
+        return _hosted_context(token)
+    if store.database_url() is not None:
+        raise NotAuthenticated(
+            "This server requires authentication and the request carried no valid token."
+        )
+    return _local_context()
+
+
+def _local_context() -> SessionContext:
     base = context_for_user(current_user_id())
-    account = session.load_account(base)
+    account = store.load_account(base)
     if (account or {}).get("mode") == TradingMode.LIVE.value:
         return base.with_mode(TradingMode.LIVE)
     return base
 
 
+def _hosted_context(token) -> SessionContext:
+    from trinetra import db
+
+    # Only the verified subject identifies a person. client_id identifies the
+    # OAuth *client* — every user of the same AI host shares one, so falling back
+    # to it would put them all in a single account.
+    subject = getattr(token, "subject", None)
+    if not subject:
+        raise NotAuthenticated(
+            "The access token carries no subject claim, so it cannot be tied to an "
+            "account."
+        )
+    user_id, account_id = db.upsert_user(subject, getattr(token, "email", None))
+    row = db.load_account_row(account_id)
+    if row is None:
+        raise NotAuthenticated(f"Account {account_id} disappeared during the request.")
+
+    return context_for_account(
+        user_id=user_id,
+        account_id=account_id,
+        trading_mode=TradingMode(row.mode),
+        max_order_value=row.max_order_value,
+        broker_name=row.broker,
+        default_product=row.default_product,
+        default_exchange=row.default_exchange,
+        paper_starting_cash=row.starting_cash,
+    )
+
+
 def require_account(ctx: SessionContext) -> dict[str, Any] | None:
     """A structured 'no account yet' payload, or None when the user is set up."""
-    if session.account_exists(ctx):
+    if store.account_exists(ctx):
         return None
     return {
         "status": "not_set_up",
@@ -171,42 +231,63 @@ def _purge_locked(now: float) -> None:
         del _pending[token]
 
 
-def issue_token(user_id: str, order: dict[str, Any],
+def issue_token(ctx: SessionContext, order: dict[str, Any],
                 preview: dict[str, Any]) -> tuple[str, int]:
-    """Store a validated order and return (token, ttl_seconds)."""
-    now = time.monotonic()
+    """Store a validated order and return (token, ttl_seconds).
+
+    Hosted runs keep pending confirmations in the database, so they survive a
+    restart and are visible to every replica. Local runs keep them in memory.
+    """
     token = f"tcai_{secrets.token_urlsafe(18)}"
+    if store.database_url() is not None:
+        from trinetra import db
+
+        db.store_confirmation(ctx, token, order, preview, TTL_SECONDS)
+        return token, int(TTL_SECONDS)
+
+    now = time.monotonic()
     with _lock:
         _purge_locked(now)
         if len(_pending) >= _MAX_PENDING:
             del _pending[min(_pending, key=lambda t: _pending[t].expires_at)]
-        _pending[token] = _Pending(user_id, order, preview, now + TTL_SECONDS)
+        _pending[token] = _Pending(ctx.user_id, order, preview, now + TTL_SECONDS)
     return token, int(TTL_SECONDS)
 
 
-def redeem_token(token: str, user_id: str) -> tuple[dict[str, Any] | None,
-                                                    dict[str, Any] | None]:
+def redeem_token(ctx: SessionContext, token: str) -> tuple[dict[str, Any] | None,
+                                                           dict[str, Any] | None]:
     """Consume a token, returning (pending, None) or (None, error).
 
     Removed on any matching attempt, so a replay can never place a second order.
     """
+    token = (token or "").strip()
+    if store.database_url() is not None:
+        from trinetra import db
+
+        pending = db.take_confirmation(ctx, token)
+        return (pending, None) if pending else (None, _token_error())
+
     now = time.monotonic()
     with _lock:
         _purge_locked(now)
-        pending = _pending.pop((token or "").strip(), None)
+        pending = _pending.pop(token, None)
 
     if pending is None:
-        return None, {
-            "status": "rejected",
-            "error": "That confirmation token is unknown, already used, or expired "
-                     f"(tokens last {int(TTL_SECONDS)} seconds). Call place_order "
-                     "again for a fresh preview, and show it to the user before "
-                     "confirming.",
-        }
-    if pending.user_id != user_id:
+        return None, _token_error()
+    if pending.user_id != ctx.user_id:
         return None, {"status": "rejected",
                       "error": "Confirmation token does not belong to this account."}
     return {"order": pending.order, "preview": pending.preview}, None
+
+
+def _token_error() -> dict[str, Any]:
+    return {
+        "status": "rejected",
+        "error": "That confirmation token is unknown, already used, or expired "
+                 f"(tokens last {int(TTL_SECONDS)} seconds). Call place_order "
+                 "again for a fresh preview, and show it to the user before "
+                 "confirming.",
+    }
 
 
 def clear_tokens() -> None:

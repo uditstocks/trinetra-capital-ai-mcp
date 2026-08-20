@@ -1,0 +1,24 @@
+# Hosted Trinetra MCP server.
+#
+#   requirements-mcp.txt     the MCP server itself (protocol, market data, maths)
+#   + this file              what hosting adds: HTTP transport, Postgres, OAuth
+#
+# requirements.txt is NOT included anywhere here — the LangChain/LangGraph stack
+# belongs to the legacy CLI and never ships to the server.
+#
+#   pip install -r requirements-server.txt
+
+-r requirements-mcp.txt
+
+# --- HTTP transport ---
+uvicorn[standard]
+starlette
+
+# --- Database ---
+sqlalchemy>=2.0
+alembic
+psycopg[binary]>=3.1
+
+# --- OAuth token verification ---
+pyjwt[crypto]>=2.8
+cryptography

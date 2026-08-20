@@ -78,7 +78,7 @@ def test_cannot_oversell(broker):
 
 def test_insufficient_cash_rejected(broker, set_cap):
     set_cap(10_000_000.0)  # lift the per-order cap so cash is the binding limit
-    # starting cash defaults to 1,000,000; try to spend 2,000,000.
+    # starting cash defaults to 100,000; try to spend far more.
     with pytest.raises(BrokerError, match="Insufficient paper cash"):
         _buy(broker, 1000, 2000.0)
 

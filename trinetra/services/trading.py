@@ -15,7 +15,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from typing import Any
 
-from trinetra import instruments, market_data, render, session
+from sqlalchemy import select
+
+from trinetra import instruments, limits, market_data, render, store
 from trinetra.broker import get_broker
 from trinetra.broker.base import BrokerError, OrderRequest
 from trinetra.logging_setup import get_logger
@@ -23,9 +25,15 @@ from trinetra.session import SessionContext
 
 log = get_logger(__name__)
 
+
+def _money(value: float) -> str:
+    return render._money(value)
+
 CONCENTRATION_PCT = 25.0
-# Order types with no explicit price, so they need a live reference price.
-_NEEDS_REFERENCE = ("market", "sl_m")
+# A limit far from market is immediately marketable, so its true exposure is the
+# market price, not the limit. Every order type therefore needs a live reference
+# price for the caps to mean anything.
+OFF_MARKET_PCT = 20.0
 
 
 # --------------------------------------------------------------------------- #
@@ -207,9 +215,7 @@ def preview_order(
             exchange=rec.exchange,
         ).normalised()
 
-        reference_price = None
-        if (order_type or "market").lower() in _NEEDS_REFERENCE:
-            reference_price = market_data.try_ltp(rec.trading_symbol)
+        reference_price = market_data.try_ltp(f"{rec.exchange}_{rec.trading_symbol}")
 
         broker = get_broker(ctx)
         broker.validate_order(req, reference_price)
@@ -225,11 +231,30 @@ def preview_order(
         if req.order_type == "MARKET":
             warnings.append("Market order — the actual fill price may differ from "
                             "this estimate.")
+        # A limit well away from market usually means a fat finger. It is priced
+        # safely either way, but the user should be told before approving.
+        chosen = req.price or req.trigger_price
+        if chosen and reference_price:
+            drift = abs(chosen - reference_price) / reference_price * 100
+            if drift > OFF_MARKET_PCT:
+                warnings.append(
+                    f"Your price of {_money(chosen)} is {drift:.0f}% away from the "
+                    f"market price of {_money(reference_price)}. If it is on the "
+                    "wrong side of the market this fills immediately at market, "
+                    "not at your price — check the numbers."
+                )
         if estimated_value and estimated_value > ctx.max_order_value * 0.8:
             warnings.append(
                 f"This uses {estimated_value / ctx.max_order_value:.0%} of your "
                 f"₹{ctx.max_order_value:,.0f} per-order safety cap."
             )
+
+        try:
+            limits.check_live_order(ctx, estimated_value)
+        except limits.LimitExceeded as exc:
+            # Surfaced now rather than after approval, so the user is not asked
+            # to confirm an order that was never going to be placed.
+            return {"status": "rejected", "error": str(exc)}
 
         preview = {
             "action": req.transaction_type,
@@ -251,7 +276,7 @@ def preview_order(
         if rec.trading_symbol != bare:
             preview["resolved_from"] = f"'{symbol}' → {rec.trading_symbol} ({rec.name})"
 
-        session.audit_order(ctx, "preview", {"preview": preview})
+        store.audit_order(ctx, "preview", {"preview": preview})
         return {
             "status": "preview",
             "preview": preview,
@@ -265,34 +290,144 @@ def preview_order(
 
 
 def execute_order(ctx: SessionContext, order: dict[str, Any]) -> dict[str, Any]:
-    """Place an order that already passed `preview_order`."""
+    """Place an order that already passed `preview_order`.
+
+    Live orders clear the account's gates here — activation, kill switch and
+    daily limits — because this is the last point before the broker call and no
+    tool can reach the broker any other way.
+    """
     try:
         req = OrderRequest(**order["request"])
         reference_price = order.get("reference_price")
     except (KeyError, TypeError) as exc:
         return {"status": "rejected", "error": f"Malformed order instruction: {exc}"}
 
-    session.audit_order(ctx, "submit", {
+    estimated_value = req.estimated_value(reference_price)
+    try:
+        limits.check_live_order(ctx, estimated_value)
+    except limits.LimitExceeded as exc:
+        store.audit_order(ctx, "blocked",
+                          {"reference_id": req.reference_id, "reason": str(exc)})
+        return {"status": "rejected", "error": str(exc)}
+
+    submitted = {
         "symbol": req.trading_symbol,
         "action": req.transaction_type,
         "quantity": req.quantity,
         "order_type": req.order_type,
         "reference_id": req.reference_id,
-    })
+        "estimated_value": estimated_value,
+    }
+    # A live order must be on the record BEFORE it can reach a broker. Writing it
+    # afterwards leaves two holes: two concurrent confirmations would both pass a
+    # daily check neither had yet consumed, and an order the broker accepted but
+    # never acknowledged would leave no trace at all.
+    if ctx.is_live:
+        try:
+            store.audit_order_strict(ctx, "submit", submitted)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Refusing live order — audit write failed: %s", exc)
+            return {
+                "status": "rejected",
+                "error": "This order could not be recorded for audit, so it was not "
+                         "placed. Try again in a moment.",
+            }
+        if not _record_live_order(ctx, req, estimated_value, status="submitting"):
+            return {
+                "status": "rejected",
+                "error": "This order could not be reserved against your daily "
+                         "limits, so it was not placed. Try again in a moment.",
+            }
+    else:
+        store.audit_order(ctx, "submit", submitted)
 
     try:
         result = get_broker(ctx).place_order(req, reference_price=reference_price)
     except BrokerError as exc:
-        session.audit_order(ctx, "rejected",
-                            {"reference_id": req.reference_id, "error": str(exc)})
-        return {"status": "rejected", "error": str(exc)}
+        store.audit_order(ctx, "rejected",
+                          {"reference_id": req.reference_id, "error": str(exc)})
+        # The broker may have accepted this before failing to answer. Recording it
+        # as "rejected" would free the daily budget and tell the user nothing
+        # happened — neither of which we actually know.
+        _record_live_order(ctx, req, estimated_value, status="unknown")
+        return {
+            "status": "rejected",
+            "error": str(exc),
+            **({"warning": "If this order may have reached the broker, check your "
+                           "order book before retrying — it could already be live.",
+                "reference_id": req.reference_id} if ctx.is_live else {}),
+        }
     except Exception as exc:  # noqa: BLE001
         log.exception("execute_order failed")
-        session.audit_order(ctx, "failed",
-                            {"reference_id": req.reference_id, "error": str(exc)})
+        store.audit_order(ctx, "failed",
+                          {"reference_id": req.reference_id, "error": str(exc)})
+        _record_live_order(ctx, req, estimated_value, status="unknown")
         return {"status": "failed", "error": str(exc)}
 
     payload = result.to_dict()
     payload["trading_mode"] = ctx.trading_mode.value
-    session.audit_order(ctx, "filled", payload)
+    _record_live_order(ctx, req, estimated_value, status=result.status,
+                       broker_order_id=result.order_id,
+                       average_price=result.average_price)
+    store.audit_order(ctx, "filled", payload)
     return payload
+
+
+def _record_live_order(
+    ctx: SessionContext,
+    req: OrderRequest,
+    estimated_value: float | None,
+    status: str,
+    broker_order_id: str | None = None,
+    average_price: float | None = None,
+) -> bool:
+    """Persist a live order so daily limits and reconciliation have a record.
+
+    `reference_id` is unique, which makes it the idempotency key: a retry of the
+    same instruction updates its row rather than creating a second order. Paper
+    orders are not recorded here — their log is the paper trade store.
+
+    Returns False if the write failed, so the caller can refuse to place an order
+    it could not account for.
+    """
+    if not (ctx.is_live and ctx.account_id):
+        return True
+    try:
+        from trinetra import db
+
+        with db.session_scope() as session:
+            row = session.scalar(
+                select(db.Order).where(
+                    # Scoped to the account: reference ids are unique in practice,
+                    # but an unscoped lookup would let one account's row be
+                    # overwritten by another's on any collision.
+                    (db.Order.reference_id == req.reference_id)
+                    & (db.Order.account_id == ctx.account_id)
+                )
+            )
+            if row is None:
+                row = db.Order(
+                    account_id=ctx.account_id,
+                    reference_id=req.reference_id,
+                    broker=ctx.broker_name,
+                    trading_symbol=req.trading_symbol,
+                    exchange=req.exchange,
+                    transaction_type=req.transaction_type,
+                    quantity=req.quantity,
+                    order_type=req.order_type,
+                    product=req.product,
+                    price=req.price or None,
+                    trigger_price=req.trigger_price,
+                    estimated_value=estimated_value,
+                )
+                session.add(row)
+            row.status = status
+            if broker_order_id:
+                row.broker_order_id = str(broker_order_id)
+            if average_price:
+                row.average_price = average_price
+            session.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not undo a placed order
+        log.error("Could not record live order %s: %s", req.reference_id, exc)
+        return False

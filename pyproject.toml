@@ -7,8 +7,9 @@ name = "trinetra-capital-ai"
 version = "1.1.0"
 description = "Agentic research and trading for Indian equities, as an MCP server"
 readme = "README.md"
+# Not open source. Copyright (c) 2026 Udit. All rights reserved.
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "Proprietary — All Rights Reserved" }
 
 # Only what the MCP server needs. The LangChain/LangGraph stack used by the
 # legacy interactive CLI lives in requirements.txt and is intentionally not a
@@ -21,6 +22,7 @@ dependencies = [
     "numpy",
     "pandas",
     "textblob",
+    "matplotlib",
     "requests",
     "python-dotenv",
 ]

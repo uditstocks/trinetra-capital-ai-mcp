@@ -312,7 +312,7 @@ def lookup_symbol(company_name: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # technical + news sentiment snapshot (yfinance history + TextBlob)
 # --------------------------------------------------------------------------- #
-def technical_snapshot(symbol: str) -> dict[str, Any]:
+def technical_snapshot(symbol: str, include_history: bool = False) -> dict[str, Any]:
     inst = _inst(symbol)
     try:
         hist = yf.Ticker(inst.yf_symbol).history(period="90d", interval="1d")
@@ -431,11 +431,35 @@ def technical_snapshot(symbol: str) -> dict[str, Any]:
     action = "BUY" if score >= 65 else "SELL" if score <= 35 else "HOLD"
     confidence = "high" if score >= 80 or score <= 20 else "moderate"
 
+    result_history: dict[str, list] = {}
+    if include_history:
+        # Full RSI series for the chart. Where average loss is zero the ratio is
+        # undefined, so pin it to the same edges the scalar case uses.
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi_series = 100 - 100 / (1 + rs)
+        rsi_series = rsi_series.where(avg_loss > 0, np.where(avg_gain > 0, 100.0, 50.0))
+        upper_band, lower_band = sma20 + 2 * std20, sma20 - 2 * std20
+
+        # Drop the warm-up window where the 20-day band has no value yet, so the
+        # chart starts where the indicators actually mean something.
+        frame = pd.DataFrame({
+            "close": close, "upper": upper_band, "lower": lower_band, "rsi": rsi_series,
+        }).dropna()
+        if not frame.empty:
+            result_history = {
+                "dates": [d.strftime("%d %b") for d in frame.index],
+                "close": [round(float(v), 2) for v in frame["close"]],
+                "bb_upper": [round(float(v), 2) for v in frame["upper"]],
+                "bb_lower": [round(float(v), 2) for v in frame["lower"]],
+                "rsi": [round(float(v), 2) for v in frame["rsi"]],
+            }
+
     return {
         "score_base": 50,
         "score_breakdown": breakdown,
         "score_raw": raw_score,
         "headlines": headlines[:5],
+        "history": result_history,
         "symbol": inst.trading_symbol,
         "exchange": inst.exchange,
         "price": price,

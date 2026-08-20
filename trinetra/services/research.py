@@ -93,9 +93,14 @@ def get_stock_snapshot(symbol: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # analysis
 # --------------------------------------------------------------------------- #
-def analyze_stock(symbol: str) -> dict[str, Any]:
-    """Technical + sentiment analysis with a step-by-step reasoning trace."""
-    snap = market_data.technical_snapshot(symbol)
+def analyze_stock(symbol: str, include_history: bool = False) -> dict[str, Any]:
+    """Technical + sentiment analysis with a step-by-step reasoning trace.
+
+    `include_history` adds a `history` block of indicator series for charting.
+    It is large and of no use to a reader, so callers that only want the verdict
+    leave it off.
+    """
+    snap = market_data.technical_snapshot(symbol, include_history=include_history)
     if snap.get("error"):
         return {"symbol": snap.get("symbol", symbol), "error": snap["error"], "reasoning": []}
 
@@ -157,4 +162,5 @@ def analyze_stock(symbol: str) -> dict[str, Any]:
             "sample_headlines": scrub_all(snap.get("headlines", [])),
         },
         "disclaimer": DISCLAIMER,
+        **({"history": snap["history"]} if include_history and snap.get("history") else {}),
     }

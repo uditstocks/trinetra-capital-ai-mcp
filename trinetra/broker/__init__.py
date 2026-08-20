@@ -37,7 +37,7 @@ def _build(ctx: SessionContext) -> Broker:
     if ctx.is_live:
         from trinetra.broker.groww_broker import GrowwBroker
 
-        log.warning("LIVE trading mode active — orders will hit the real Groww account.")
+        log.warning("LIVE trading mode active — orders will hit a real account.")
         return GrowwBroker(ctx)
 
     from trinetra.broker.paper_broker import PaperBroker
@@ -59,6 +59,14 @@ def get_broker(ctx: SessionContext | None = None, force: bool = False) -> Broker
             _broker = _build(default_context())
         return _broker
 
+    if ctx.is_live and ctx.account_id:
+        # Hosted live: the adapter is built from the user's vaulted credentials
+        # and cached by the registry on its own short TTL, so a revoked link or a
+        # kill switch stops working promptly rather than living in a cache here.
+        from trinetra.broker import registry
+
+        return registry.live_broker(ctx)
+
     key = f"{ctx.user_id}|{ctx.trading_mode.value}"
     if force or key not in _brokers:
         _brokers[key] = _build(ctx)
@@ -70,16 +78,19 @@ def reset_brokers() -> None:
     global _broker
     _broker = None
     _brokers.clear()
+    from trinetra.broker import registry
+
+    registry.clear()
 
 
 __all__ = [
-    "get_broker",
-    "reset_brokers",
     "Broker",
     "BrokerError",
+    "Funds",
+    "Holding",
     "OrderRequest",
     "OrderResult",
-    "Holding",
     "Position",
-    "Funds",
+    "get_broker",
+    "reset_brokers",
 ]

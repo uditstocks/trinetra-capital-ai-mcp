@@ -6,46 +6,33 @@ gets its own throwaway data root so no user state leaks between cases.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
 from trinetra import broker as broker_pkg
-from trinetra.instruments import InstrumentRecord
-from trinetra.services import trading as trading_svc
 from trinetra_mcp import runtime
-from trinetra_mcp.server import build_server
-
-
-def _rec(symbol="RELIANCE", exchange="NSE", buy=True):
-    return InstrumentRecord(
-        trading_symbol=symbol, exchange=exchange, name=f"{symbol} Ltd",
-        series="EQ", isin="INE000000001", lot_size=1,
-        buy_allowed=buy, sell_allowed=True,
-    )
-
-
-@pytest.fixture
-def mcp(tmp_path, monkeypatch):
-    """A server bound to an isolated data root, with the network stubbed out."""
-    import trinetra.market_data as market_data
-
-    monkeypatch.setenv("TRINETRA_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("TRINETRA_USER_ID", "tester")
-    monkeypatch.setattr(trading_svc.instruments, "resolve", lambda s, e=None: _rec())
-    monkeypatch.setattr(trading_svc.instruments, "search", lambda s, limit=3: [])
-    monkeypatch.setattr(market_data, "try_ltp", lambda s: 2500.0)
-    monkeypatch.setattr(market_data, "ltp_many", lambda syms: dict.fromkeys(syms, 2600.0))
-    broker_pkg.reset_brokers()
-    runtime.clear_tokens()
-    yield build_server()
-    broker_pkg.reset_brokers()
-    runtime.clear_tokens()
 
 
 def call(server, name, **kwargs):
-    """Invoke an MCP tool and return its structured payload."""
+    """Invoke an MCP tool and return its data payload.
+
+    call_tool answers either (content, structured) or a bare content list, and a
+    tool that also renders a chart returns [text, image] with no structured
+    content — so identify the shape rather than unpacking blindly.
+    """
     result = asyncio.run(server.call_tool(name, kwargs))
-    return result[1] if isinstance(result, tuple) else result
+    if isinstance(result, tuple):
+        content, structured = result
+        if structured is not None:
+            return structured
+    else:
+        content = result
+    for block in content:
+        text = getattr(block, "text", None)
+        if text:
+            return json.loads(text)
+    raise AssertionError(f"{name} returned no text block: {content!r}")
 
 
 # --------------------------------------------------------------------------- #
