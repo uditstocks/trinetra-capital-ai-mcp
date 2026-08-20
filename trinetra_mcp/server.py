@@ -15,6 +15,7 @@ import contextlib
 import os
 import sys
 import threading
+import warnings
 
 from mcp.server.fastmcp import FastMCP
 
@@ -243,6 +244,14 @@ def main() -> None:
     # langchain_core probes `transformers` at import, which drags in the whole
     # torch/CUDA stack when it happens to be installed. Nothing here needs it.
     os.environ.setdefault("USE_TORCH", "0")
+
+    # pydantic_settings warns about an unresolved forward reference on a field
+    # inside the MCP SDK's own settings model. It is not ours to fix and nothing
+    # depends on that field, but it prints on every boot — and a log that cries
+    # wolf is a log nobody reads when something real breaks.
+    warnings.filterwarnings(
+        "ignore", message=r".*Field 'lifespan' has an incomplete definition.*"
+    )
 
     # Logs carry ₹ and other non-ASCII. The stdio transport already forces UTF-8
     # on the protocol stream; this keeps the diagnostic stream readable too,

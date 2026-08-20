@@ -45,4 +45,4 @@ dev = ["pytest"]
 trinetra-mcp = "trinetra_mcp.server:main"
 
 [tool.setuptools]
-packages = ["trinetra", "trinetra.broker", "trinetra.services", "trinetra_mcp", "trinetra_mcp.tools"]
+packages = ["trinetra", "trinetra.broker", "trinetra.services", "trinetra_mcp", "trinetra_web"]

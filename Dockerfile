@@ -19,8 +19,12 @@ WORKDIR /app
 COPY requirements-mcp.txt requirements-server.txt ./
 RUN pip install --no-cache-dir -r requirements-server.txt
 
+# Every first-party package the server imports. tests/test_packaging.py fails
+# if one is added to the repo and forgotten here — which is exactly how the
+# first deploy of the linking pages broke.
 COPY trinetra/ ./trinetra/
 COPY trinetra_mcp/ ./trinetra_mcp/
+COPY trinetra_web/ ./trinetra_web/
 COPY migrations/ ./migrations/
 COPY alembic.ini ./
 
