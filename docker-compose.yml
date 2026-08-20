@@ -1,0 +1,11 @@
+version: "3.8"
+
+services:
+  trading-agent:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./portfolio.json:/app/portfolio.json
+    stdin_open: true
+    tty: true

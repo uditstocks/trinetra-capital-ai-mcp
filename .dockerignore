@@ -1,0 +1,10 @@
+prebuilt_basics/
+.env
+__pycache__/
+tempCodeRunnerFile.py
+portfolio.json
+prebuilt_agents.py
+bugs.txt
+.groww_token_cache.json
+.groww_instruments.csv
+*.tar

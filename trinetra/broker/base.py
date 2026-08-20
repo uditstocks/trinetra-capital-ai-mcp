@@ -1,0 +1,280 @@
+"""Broker interface + normalised data types.
+
+Both PaperBroker and GrowwBroker speak this vocabulary so the agents/tools never
+have to know which one is active. All money values are in INR.
+"""
+
+from __future__ import annotations
+
+import uuid
+from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
+from trinetra.config import settings
+
+
+class BrokerError(Exception):
+    """Raised for any recoverable broker problem (validation, API error)."""
+
+
+# Normalised constants used across the app. The Groww broker maps these onto the
+# SDK's own constants; the paper broker just stores them.
+BUY = "BUY"
+SELL = "SELL"
+MARKET = "MARKET"
+LIMIT = "LIMIT"
+SL = "SL"        # stop-loss limit (needs price + trigger_price)
+SL_M = "SL_M"    # stop-loss market (needs trigger_price)
+ORDER_TYPES = (MARKET, LIMIT, SL, SL_M)
+PRODUCT_CNC = "CNC"  # delivery
+PRODUCT_MIS = "MIS"  # intraday
+SEGMENT_CASH = "CASH"
+VALIDITY_DAY = "DAY"
+
+
+def new_reference_id() -> str:
+    """Groww requires an alphanumeric reference id (hyphens allowed, <=20 chars)."""
+    return f"trn-{uuid.uuid4().hex[:12]}"
+
+
+@dataclass
+class OrderRequest:
+    trading_symbol: str
+    transaction_type: str           # BUY | SELL
+    quantity: int
+    exchange: str = "NSE"           # NSE | BSE
+    segment: str = SEGMENT_CASH
+    product: str = PRODUCT_CNC      # CNC | MIS
+    order_type: str = MARKET        # MARKET | LIMIT
+    price: float = 0.0              # required for LIMIT, ignored for MARKET
+    trigger_price: float | None = None
+    validity: str = VALIDITY_DAY
+    reference_id: str = field(default_factory=new_reference_id)
+
+    def normalised(self) -> "OrderRequest":
+        """Return a validated copy with a bare Groww trading symbol + resolved
+        exchange (so "RELIANCE.NS"/"TCS.BO" become "RELIANCE"@NSE / "TCS"@BSE).
+        Raises BrokerError on bad input."""
+        from trinetra.symbols import normalize  # local import: avoids any cycle
+
+        inst = normalize(self.trading_symbol, self.exchange)
+
+        tt = self.transaction_type.strip().upper()
+        if tt not in (BUY, SELL):
+            raise BrokerError(f"transaction_type must be BUY or SELL, got {self.transaction_type!r}")
+
+        ot = self.order_type.strip().upper().replace("STOP_LOSS_MARKET", SL_M).replace(
+            "STOP_LOSS", SL
+        )
+        if ot not in ORDER_TYPES:
+            raise BrokerError(
+                f"order_type must be one of MARKET/LIMIT/SL/SL_M, got {self.order_type!r}"
+            )
+
+        product = self.product.strip().upper()
+        if product not in (PRODUCT_CNC, PRODUCT_MIS):
+            raise BrokerError(f"product must be CNC or MIS, got {self.product!r}")
+
+        qty = int(self.quantity)
+        if qty <= 0:
+            raise BrokerError(f"quantity must be a positive integer, got {self.quantity!r}")
+
+        if ot in (LIMIT, SL) and (not self.price or self.price <= 0):
+            raise BrokerError(f"{ot} orders require a positive limit price.")
+        if ot in (SL, SL_M) and (not self.trigger_price or self.trigger_price <= 0):
+            raise BrokerError(f"{ot} (stop-loss) orders require a positive trigger_price.")
+
+        return OrderRequest(
+            trading_symbol=inst.trading_symbol,
+            transaction_type=tt,
+            quantity=qty,
+            exchange=inst.exchange,
+            segment=self.segment.strip().upper(),
+            product=product,
+            order_type=ot,
+            price=float(self.price or 0.0),
+            trigger_price=self.trigger_price,
+            validity=self.validity.strip().upper(),
+            reference_id=self.reference_id,
+        )
+
+    def estimated_value(self, reference_price: float | None = None) -> float:
+        """Best-effort notional value for the safety cap check."""
+        ot = self.order_type.strip().upper()
+        if ot in (LIMIT, SL) and self.price:
+            px = self.price
+        elif ot == SL_M and self.trigger_price:
+            px = self.trigger_price
+        else:
+            px = reference_price or 0.0
+        return round(self.quantity * (px or 0.0), 2)
+
+
+@dataclass
+class OrderResult:
+    status: str                     # placed | filled | rejected | failed
+    transaction_type: str
+    trading_symbol: str
+    quantity: int
+    order_type: str
+    product: str
+    mode: str                       # paper | live
+    order_id: str | None = None
+    price: float | None = None
+    trigger_price: float | None = None
+    average_price: float | None = None
+    estimated_value: float | None = None
+    reference_id: str | None = None
+    exchange: str | None = None
+    message: str | None = None
+    raw: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d.pop("raw", None)  # keep the agent-facing payload clean
+        return {k: v for k, v in d.items() if v is not None}
+
+
+@dataclass
+class Holding:
+    trading_symbol: str
+    quantity: int
+    average_price: float
+    last_price: float | None = None
+    invested: float | None = None
+    current_value: float | None = None
+    pnl: float | None = None            # unrealized (mark-to-market on open shares)
+    pnl_pct: float | None = None
+    realised_pnl: float | None = None   # booked P&L on shares of this symbol already sold
+    holding_days: int | None = None     # days since the first buy (delivery holding period)
+    allocation_pct: float | None = None  # this holding's weight in the portfolio (%)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+
+@dataclass
+class Position:
+    trading_symbol: str
+    quantity: int
+    product: str
+    segment: str
+    average_price: float | None = None
+    last_price: float | None = None
+    realised_pnl: float | None = None
+    unrealised_pnl: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+
+@dataclass
+class Funds:
+    available_cash: float
+    margin_used: float = 0.0
+    net: float | None = None
+    mode: str = "paper"
+    detail: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = {
+            "available_cash": round(self.available_cash, 2),
+            "margin_used": round(self.margin_used, 2),
+            "mode": self.mode,
+        }
+        if self.net is not None:
+            d["net"] = round(self.net, 2)
+        if self.detail:
+            d["detail"] = self.detail
+        return d
+
+
+class Broker(ABC):
+    """Abstract broker. Implementations must enforce the order-value safety cap
+    via `guard_order` before sending anything irreversible."""
+
+    name: str = "broker"
+    mode: str = "paper"
+
+    def guard_order(self, req: OrderRequest, reference_price: float | None = None) -> None:
+        """Hard ceiling enforced for both paper and live orders.
+
+        Fails CLOSED: if the order's notional value cannot be determined (e.g. a
+        market order with no resolvable reference price), the order is REJECTED
+        rather than allowed through uncapped. This closes the gap where a failed
+        price lookup would otherwise let an oversized market order skip the cap.
+        """
+        value = req.estimated_value(reference_price)
+        cap = settings.max_order_value
+        if not value or value <= 0:
+            raise BrokerError(
+                "Cannot determine this order's value — no reference price is "
+                "available, so the ₹{:,.2f} safety cap (GROWW_MAX_ORDER_VALUE) "
+                "cannot be enforced. Refusing the order. Fetch a live quote and "
+                "retry, or place a LIMIT order with an explicit price.".format(cap)
+            )
+        if value > cap:
+            raise BrokerError(
+                f"Order value ₹{value:,.2f} exceeds the safety cap of ₹{cap:,.2f} "
+                f"(GROWW_MAX_ORDER_VALUE). Reduce quantity or raise the cap."
+            )
+
+    @abstractmethod
+    def place_order(self, req: OrderRequest, reference_price: float | None = None) -> OrderResult:
+        ...
+
+    @abstractmethod
+    def cancel_order(self, order_id: str, segment: str = SEGMENT_CASH) -> dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def modify_order(
+        self,
+        order_id: str,
+        quantity: int | None = None,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        order_type: str | None = None,
+        segment: str = SEGMENT_CASH,
+    ) -> dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def get_order_status(self, order_id: str, segment: str = SEGMENT_CASH) -> dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def get_order_history(self, limit: int = 20, segment: str = SEGMENT_CASH) -> list[dict[str, Any]]:
+        ...
+
+    @abstractmethod
+    def get_holdings(self) -> list[Holding]:
+        ...
+
+    @abstractmethod
+    def get_positions(self, segment: str | None = None) -> list[Position]:
+        ...
+
+    @abstractmethod
+    def get_funds(self) -> Funds:
+        ...
+
+    def performance(self) -> dict[str, Any]:
+        """Realized-P&L + trade-performance analytics. Only paper mode can derive
+        these from its own trade log; live brokers override or fall back to this
+        honest 'not available' notice (Groww exposes no historical booked P&L for
+        delivery holdings)."""
+        return {
+            "available": False,
+            "mode": self.mode,
+            "error": "Performance analytics (booked P&L, win-rate, closed "
+                     "positions) are available in paper mode only. In live mode, "
+                     "use your Groww order book for realized figures.",
+        }
+
+    def realized_total(self) -> float | None:
+        """Cheap (no-network) total booked P&L across ALL symbols ever traded,
+        including fully-closed positions. None when the broker can't derive it
+        (live mode). Used by the portfolio summary's realized/overall figures."""
+        return None

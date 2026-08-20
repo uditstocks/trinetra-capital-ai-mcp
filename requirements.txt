@@ -1,0 +1,36 @@
+# --- Agent framework ---
+langchain
+langchain-core
+langgraph
+langgraph-supervisor
+
+# --- LLM providers ---
+langchain-nvidia-ai-endpoints
+langchain-groq
+langchain-ollama
+langchain-openai  # OpenRouter (OpenAI-compatible) endpoint
+
+# --- Groww broker integration ---
+growwapi>=1.5.0
+pyotp
+
+# --- Market data ---
+yfinance
+# yfinance needs >=13 (websockets.asyncio); langgraph-sdk needs <17.
+websockets>=14,<17
+
+# --- Technical + sentiment analysis ---
+numpy
+pandas
+requests
+beautifulsoup4
+textblob
+
+# --- Terminal UI ---
+rich
+
+# --- Config ---
+python-dotenv
+
+# --- Tests (dev) ---
+pytest

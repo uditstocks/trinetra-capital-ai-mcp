@@ -1,0 +1,15 @@
+.env
+portfolio.json
+__pycache__/
+tempCodeRunnerFile.py
+bugs.txt
+*.tar
+.groww_token_cache.json
+.groww_instruments.csv
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
