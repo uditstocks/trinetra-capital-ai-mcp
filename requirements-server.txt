@@ -10,15 +10,21 @@
 
 -r requirements-mcp.txt
 
+# Every dependency carries a major-version upper bound. What was tested has to
+# be what runs: a major release landing between a green test run and a deploy is
+# how this service breaks without anyone changing a line of code.
+
 # --- HTTP transport ---
-uvicorn[standard]
-starlette
+# No lower bound: mcp declares what it needs, and inventing a floor we have not
+# tested against is its own risk. The upper bound is the point.
+uvicorn[standard]<1
+starlette<1
 
 # --- Database ---
-sqlalchemy>=2.0
-alembic
-psycopg[binary]>=3.1
+sqlalchemy>=2.0,<3
+alembic>=1.13,<2
+psycopg[binary]>=3.1,<4
 
 # --- OAuth token verification ---
-pyjwt[crypto]>=2.8
-cryptography
+pyjwt[crypto]>=2.8,<3
+cryptography>=42,<48

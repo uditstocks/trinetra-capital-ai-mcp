@@ -9,7 +9,9 @@
 #   pip install -r requirements-mcp.txt
 
 # --- MCP protocol ---
-mcp>=1.2.0
+# Upper bound is load-bearing, not caution: mcp 2.0 removed mcp.server.fastmcp
+# entirely, so an unpinned install silently deploys code that cannot import.
+mcp>=1.26,<2
 
 # --- Market data ---
 yfinance

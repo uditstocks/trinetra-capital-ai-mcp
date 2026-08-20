@@ -16,7 +16,7 @@ license = { text = "Proprietary — All Rights Reserved" }
 # dependency here — the host AI is the reasoning layer, so the server needs no
 # LLM libraries and no API keys.
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.26,<2",
     "yfinance",
     "websockets>=14,<17",
     "numpy",
