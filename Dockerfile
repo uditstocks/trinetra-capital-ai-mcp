@@ -30,6 +30,13 @@ COPY alembic.ini ./
 
 # Never run as root.
 RUN useradd --create-home --uid 10001 trinetra && chown -R trinetra:trinetra /app
+
+# Docker's USER directive does not set HOME. Without it Path.home() has to fall
+# back to the passwd database — which works, but session.data_root() depends on
+# it on every request, and matplotlib would rebuild its font cache on each boot
+# for want of a writable config dir. One line removes both doubts.
+ENV HOME=/home/trinetra     MPLCONFIGDIR=/home/trinetra/.cache/matplotlib
+RUN mkdir -p /home/trinetra/.cache/matplotlib     && chown -R trinetra:trinetra /home/trinetra
 USER trinetra
 
 EXPOSE 8000
