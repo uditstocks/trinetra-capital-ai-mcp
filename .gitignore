@@ -13,3 +13,13 @@ env/
 
 # Tooling caches
 .pytest_cache/
+
+# Runtime data
+orders_audit.log
+account.json
+.trinetra/
+
+# Packaging
+*.egg-info/
+build/
+dist/

@@ -12,7 +12,7 @@ adding brokers never touches the agents or tools.
 
 from __future__ import annotations
 
-from trinetra.config import settings
+from trinetra.session import SessionContext, default_context
 from trinetra.logging_setup import get_logger
 from trinetra.broker.base import (
     Broker,
@@ -26,29 +26,55 @@ from trinetra.broker.base import (
 
 log = get_logger(__name__)
 
+# Legacy single-user slot (the CLI path). Kept as a module attribute because the
+# test suite resets it directly.
 _broker: Broker | None = None
+# Per-user cache for the MCP path, keyed by "user_id|mode".
+_brokers: dict[str, Broker] = {}
 
 
-def get_broker(force: bool = False) -> Broker:
-    global _broker
-    if _broker is not None and not force:
-        return _broker
-
-    if settings.is_live:
+def _build(ctx: SessionContext) -> Broker:
+    if ctx.is_live:
         from trinetra.broker.groww_broker import GrowwBroker
 
         log.warning("LIVE trading mode active — orders will hit the real Groww account.")
-        _broker = GrowwBroker()
-    else:
-        from trinetra.broker.paper_broker import PaperBroker
+        return GrowwBroker(ctx)
 
-        log.info("PAPER trading mode - orders are simulated (no real money).")
-        _broker = PaperBroker()
-    return _broker
+    from trinetra.broker.paper_broker import PaperBroker
+
+    log.info("PAPER trading mode - orders are simulated (no real money).")
+    return PaperBroker(ctx)
+
+
+def get_broker(ctx: SessionContext | None = None, force: bool = False) -> Broker:
+    """Broker bound to `ctx`, or to the process default when ctx is None.
+
+    The default (CLI) broker keeps its own slot so its lazily-resolved context
+    still tracks runtime settings changes. Explicit contexts are cached per user
+    and mode, so two MCP users never share broker state.
+    """
+    global _broker
+    if ctx is None:
+        if _broker is None or force:
+            _broker = _build(default_context())
+        return _broker
+
+    key = f"{ctx.user_id}|{ctx.trading_mode.value}"
+    if force or key not in _brokers:
+        _brokers[key] = _build(ctx)
+    return _brokers[key]
+
+
+def reset_brokers() -> None:
+    """Drop every cached broker (used by tests and on mode switches)."""
+    global _broker
+    _broker = None
+    _brokers.clear()
 
 
 __all__ = [
     "get_broker",
+    "reset_brokers",
     "Broker",
     "BrokerError",
     "OrderRequest",

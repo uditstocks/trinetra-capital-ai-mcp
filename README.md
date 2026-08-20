@@ -1,7 +1,47 @@
 # 🔱 Trinetra Capital AI
 ### *Multi-Agents. One Market. Zero Missed Moves.*
 
-> An autonomous, multi-agent AI trading system built with LangGraph, LangChain and NVIDIA NIM — now wired to the **Groww Trading API** for real order execution, live market data and portfolio management on NSE/BSE, with human-in-the-loop safety on every order.
+> An autonomous, multi-agent AI trading system for NSE/BSE — now available as an **MCP server**, so you can run it straight from Claude Desktop or ChatGPT Desktop instead of a terminal.
+
+---
+
+## 🔌 Use it from your AI (recommended)
+
+Talk to Trinetra inside the AI you already use. No API keys, no accounts, nothing to deploy.
+
+```bash
+pip install -r requirements-mcp.txt
+```
+
+Then add this to `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) and restart the app:
+
+```json
+{
+  "mcpServers": {
+    "trinetra": {
+      "command": "python",
+      "args": ["-m", "trinetra_mcp"],
+      "env": { "PYTHONPATH": "/path/to/Trinetra-Capital-AI" }
+    }
+  }
+}
+```
+
+Now just talk:
+
+```
+set me up for paper trading
+how does Infosys look right now?      → full reasoning trace, not a vibe
+buy 10 shares of HCL                  → preview first, places nothing until you say yes
+show my portfolio
+how much profit have I booked?
+```
+
+**Prices and analysis are real and live — only the money is simulated.** Every order takes two
+steps: your AI shows a preview, and nothing is placed until you explicitly approve it.
+
+📖 Full setup, ChatGPT Desktop, Claude Code and troubleshooting: **[docs/INSTALL_MCP.md](docs/INSTALL_MCP.md)**
 
 ---
 

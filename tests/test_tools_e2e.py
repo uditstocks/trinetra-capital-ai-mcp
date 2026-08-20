@@ -8,6 +8,7 @@ import pytest
 
 from trinetra import tools
 from trinetra.instruments import InstrumentRecord
+from trinetra.services import trading as trading_svc
 
 
 def _rec(symbol="RELIANCE", exchange="NSE", buy=True, sell=True):
@@ -22,8 +23,8 @@ def _rec(symbol="RELIANCE", exchange="NSE", buy=True, sell=True):
 def offline(isolate_portfolio, monkeypatch):
     import trinetra.market_data as market_data
     # Authoritative resolution without the instrument-master network.
-    monkeypatch.setattr(tools.instruments, "resolve", lambda s, e=None: _rec())
-    monkeypatch.setattr(tools.instruments, "search", lambda s, limit=3: [])
+    monkeypatch.setattr(trading_svc.instruments, "resolve", lambda s, e=None: _rec())
+    monkeypatch.setattr(trading_svc.instruments, "search", lambda s, limit=3: [])
     monkeypatch.setattr(market_data, "try_ltp", lambda s: 2500.0)
     monkeypatch.setattr(market_data, "ltp_many", lambda syms: {s: 2600.0 for s in syms})
     return market_data
@@ -38,8 +39,8 @@ def test_place_order_paper_e2e(offline):
 
 
 def test_place_order_rejects_unknown_symbol(isolate_portfolio, monkeypatch):
-    monkeypatch.setattr(tools.instruments, "resolve", lambda s, e=None: None)
-    monkeypatch.setattr(tools.instruments, "search", lambda s, limit=3: [])
+    monkeypatch.setattr(trading_svc.instruments, "resolve", lambda s, e=None: None)
+    monkeypatch.setattr(trading_svc.instruments, "search", lambda s, limit=3: [])
     out = json.loads(tools.place_order.invoke({
         "symbol": "NOTAREALSTOCK", "action": "buy", "quantity": 1}))
     assert out["status"] == "rejected"
@@ -73,7 +74,7 @@ def test_get_funds_paper(offline):
 
 def test_buy_disabled_symbol_rejected(isolate_portfolio, monkeypatch):
     import trinetra.market_data as market_data
-    monkeypatch.setattr(tools.instruments, "resolve", lambda s, e=None: _rec(buy=False))
+    monkeypatch.setattr(trading_svc.instruments, "resolve", lambda s, e=None: _rec(buy=False))
     monkeypatch.setattr(market_data, "try_ltp", lambda s: 2500.0)
     out = json.loads(tools.place_order.invoke({
         "symbol": "RELIANCE", "action": "buy", "quantity": 1}))

@@ -15,7 +15,6 @@ import json
 from datetime import date, datetime
 from typing import Any
 
-from trinetra.config import settings
 from trinetra.broker.base import (
     Broker,
     BrokerError,
@@ -38,7 +37,7 @@ class PaperBroker(Broker):
     # trade-log persistence
     # ------------------------------------------------------------------ #
     def _load(self) -> list[dict[str, Any]]:
-        path = settings.portfolio_file
+        path = self.ctx.portfolio_file
         if not path.exists():
             return []
         try:
@@ -49,14 +48,16 @@ class PaperBroker(Broker):
             return []
 
     def _save(self, trades: list[dict[str, Any]]) -> None:
-        settings.portfolio_file.write_text(json.dumps(trades, indent=2))
+        self.ctx.portfolio_file.parent.mkdir(parents=True, exist_ok=True)
+        self.ctx.portfolio_file.write_text(json.dumps(trades, indent=2))
 
     # ------------------------------------------------------------------ #
     # orders
     # ------------------------------------------------------------------ #
-    def place_order(self, req: OrderRequest, reference_price: float | None = None) -> OrderResult:
-        req = req.normalised()
-
+    def _preflight(self, req: OrderRequest, reference_price: float | None = None) -> float:
+        """Every check that can be made without mutating state. Returns the fill
+        price. Shared by `validate_order` (preview) and `place_order` (execution)
+        so a preview can never approve something execution would then reject."""
         # Paper mode has no live feed to watch a stop trigger, so be honest.
         if req.order_type in ("SL", "SL_M"):
             raise BrokerError(
@@ -90,13 +91,22 @@ class PaperBroker(Broker):
                 a = str(t.get("action", "")).lower()
                 tot = float(t.get("total", 0) or 0)
                 net_invested += tot if a == "buy" else (-tot if a == "sell" else 0.0)
-            available = round(settings.paper_starting_cash - net_invested, 2)
+            available = round(self.ctx.paper_starting_cash - net_invested, 2)
             if total > available:
                 raise BrokerError(
                     f"Insufficient paper cash: this order costs ₹{total:,.2f} but "
                     f"only ₹{available:,.2f} is available. Reduce the quantity or "
                     "sell holdings first."
                 )
+        return fill_price
+
+    def validate_order(self, req: OrderRequest, reference_price: float | None = None) -> None:
+        self._preflight(req.normalised(), reference_price)
+
+    def place_order(self, req: OrderRequest, reference_price: float | None = None) -> OrderResult:
+        req = req.normalised()
+        fill_price = self._preflight(req, reference_price)
+        total = round(req.quantity * fill_price, 2)
 
         order_id = f"PAPER-{req.reference_id}"
         trades = self._load()
@@ -313,7 +323,7 @@ class PaperBroker(Broker):
                 net_invested += total
             elif action == "sell":
                 net_invested -= total
-        available = settings.paper_starting_cash - net_invested
+        available = self.ctx.paper_starting_cash - net_invested
 
         # Net worth = free cash + current market value of holdings. Falls back to
         # cost basis if live prices are unavailable, and never lets a market-data
@@ -332,5 +342,5 @@ class PaperBroker(Broker):
             margin_used=round(net_invested, 2),
             net=round(available + holdings_value, 2),
             mode=self.mode,
-            detail={"starting_cash": settings.paper_starting_cash},
+            detail={"starting_cash": self.ctx.paper_starting_cash},
         )

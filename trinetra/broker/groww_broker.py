@@ -45,7 +45,8 @@ class GrowwBroker(Broker):
     name = "groww"
     mode = "live"
 
-    def __init__(self) -> None:
+    def __init__(self, ctx=None) -> None:
+        super().__init__(ctx)
         # Fail fast & loudly if credentials are missing — we are about to trade
         # real money.
         self._client = groww_client.get_client()

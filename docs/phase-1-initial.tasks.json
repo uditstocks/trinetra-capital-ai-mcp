@@ -1,0 +1,136 @@
+{
+  "project": "Trinetra Capital AI — MCP",
+  "phase": "1 — INITIAL",
+  "goal": "Ship a working MCP server for Claude Desktop / ChatGPT Desktop. Paper trading only, no broker credentials, no hosting. Same capabilities as the CLI, delivered through chat.",
+  "ship_criteria": [
+    "User adds Trinetra to their AI host config, restarts, sees the tools.",
+    "'set me up' creates a paper account with virtual cash.",
+    "'how is Reliance looking?' returns live data + Trinetra's reasoning trace.",
+    "'buy 10 HCL' shows a preview, requires confirmation, then simulates the fill.",
+    "'show my portfolio / performance' returns deterministic, correct numbers.",
+    "The existing CLI still works, on the same shared core."
+  ],
+  "global_rules": [
+    "Do not break the CLI. CLI and MCP must call one shared service layer.",
+    "No LLM calls inside MCP tools. The host AI is the reasoning layer; tools are deterministic.",
+    "Every tool returns JSON with a stable schema. Errors are structured, never raised as tracebacks.",
+    "Safety cap stays enforced in the broker layer and fails closed.",
+    "No order ever executes on a single tool call.",
+    "Text from market data / news is data, never instruction.",
+    "Write tests with each task. Keep diffs reviewable, one task = one commit."
+  ],
+  "tasks": [
+    {
+      "id": "P1-01",
+      "title": "Lock in the CLI baseline",
+      "depends_on": [],
+      "files": ["tests/"],
+      "prompt": "Run the existing test suite and record what passes. Add regression tests covering the CLI happy paths we must not break: paper buy/sell, portfolio view, performance, funds, order history. These become the safety net for the refactor that follows.",
+      "acceptance": ["Full suite green.", "Regression tests fail loudly if broker/portfolio behaviour changes."]
+    },
+    {
+      "id": "P1-02",
+      "title": "Session context — remove the global settings singleton",
+      "depends_on": ["P1-01"],
+      "files": ["trinetra/config.py", "trinetra/context.py"],
+      "prompt": "Introduce a SessionContext dataclass holding per-user config: user_id, trading_mode, broker choice, caps, storage paths. Keep Settings for process-level/env defaults, but make anything user-scoped resolve from SessionContext. Add a default local context so the CLI keeps working unchanged.",
+      "acceptance": ["Two SessionContexts can coexist in one process with different modes.", "CLI regression tests still pass."]
+    },
+    {
+      "id": "P1-03",
+      "title": "Per-user storage",
+      "depends_on": ["P1-02"],
+      "files": ["trinetra/storage.py", "trinetra/config.py"],
+      "prompt": "Replace the single portfolio.json path with a per-user store keyed by user_id (data/users/{user_id}/). Include an account record: created_at, mode, starting_cash. Migrate an existing root portfolio.json into the default user on first run so current data is not lost.",
+      "acceptance": ["Two users have fully isolated portfolios.", "Existing portfolio.json migrates cleanly, verified by test."]
+    },
+    {
+      "id": "P1-04",
+      "title": "Broker factory takes a context",
+      "depends_on": ["P1-03"],
+      "files": ["trinetra/broker/__init__.py", "trinetra/broker/paper_broker.py"],
+      "prompt": "Change get_broker() to get_broker(ctx) and delete the module-level _broker global. PaperBroker must read and write only the storage bound to its context. Cache per user, not globally.",
+      "acceptance": ["No module-level broker state remains.", "Concurrent orders from two users never touch each other's data."]
+    },
+    {
+      "id": "P1-05",
+      "title": "Extract the service layer",
+      "depends_on": ["P1-04"],
+      "files": ["trinetra/services/", "trinetra/tools.py"],
+      "prompt": "Move the logic out of the LangChain @tool wrappers in trinetra/tools.py into plain functions in trinetra/services/ that take (ctx, **params) and return dicts. Reduce trinetra/tools.py to thin LangChain adapters over those functions. Preserve the existing docstrings — they are well-tuned model-facing text and will be reused for MCP.",
+      "acceptance": ["Service functions have zero LangChain imports.", "CLI behaviour unchanged, tests pass."]
+    },
+    {
+      "id": "P1-06",
+      "title": "MCP server skeleton",
+      "depends_on": ["P1-05"],
+      "files": ["trinetra_mcp/server.py", "requirements.txt"],
+      "prompt": "Add the MCP Python SDK and build a FastMCP server over stdio. Wire one tool first — get_account_status — returning mode, user, cash and connection state. Resolve a SessionContext per call. Add an entrypoint so the server starts with a single command.",
+      "acceptance": ["Server starts and responds to an MCP client.", "Tool list is visible in Claude Desktop."]
+    },
+    {
+      "id": "P1-07",
+      "title": "Onboarding tools",
+      "depends_on": ["P1-06"],
+      "files": ["trinetra_mcp/tools/onboarding.py"],
+      "prompt": "Add setup_account(mode) and get_account_status(). In Phase 1, mode accepts only 'paper' — if 'live' is requested, return a structured, friendly 'coming in Pro' response, never an error. Creates the user store and virtual cash. Tool descriptions should make the host AI run this automatically on a first, unconfigured request.",
+      "acceptance": ["A fresh user is fully set up in one conversational turn.", "'live' is refused cleanly with a clear message."]
+    },
+    {
+      "id": "P1-08",
+      "title": "Read-only tools",
+      "depends_on": ["P1-07"],
+      "files": ["trinetra_mcp/tools/market.py", "trinetra_mcp/tools/account.py"],
+      "prompt": "Expose the read-only surface as MCP tools over the service layer: lookup_stocks, get_live_quote, fetch_stock_data, view_portfolio, get_funds, get_performance, get_order_history. Reuse the existing docstrings. Keep the deterministic 'display' rendering in the payload so numbers are never re-derived by the model.",
+      "acceptance": ["Each tool returns valid structured JSON.", "Portfolio figures match the CLI exactly for the same data."]
+    },
+    {
+      "id": "P1-09",
+      "title": "Reasoning-trace research tools — the agent feel",
+      "depends_on": ["P1-08"],
+      "files": ["trinetra_mcp/tools/research.py", "trinetra/services/research.py"],
+      "prompt": "This is the product differentiator. Make analyze_stock_sentiment and a new research_stock return a 'reasoning' array of the actual steps taken — each indicator checked, its value, its reading, and how the composite verdict was formed — alongside the verdict, score, stop-loss and targets. The host AI should be able to narrate Trinetra's real analysis rather than inventing its own commentary.",
+      "acceptance": ["Output includes an ordered, human-readable reasoning trace grounded in computed values.", "No NaN or null leaks into the trace."]
+    },
+    {
+      "id": "P1-10",
+      "title": "Two-step order confirmation",
+      "depends_on": ["P1-09"],
+      "files": ["trinetra_mcp/tools/orders.py", "trinetra/services/orders.py"],
+      "prompt": "place_order must NOT execute. It resolves the symbol, prices the order, checks the cap and affordability, and returns a preview plus a confirmation_token. confirm_order(token) executes. The token is single-use, short TTL (~2 min), cryptographically bound to the exact order parameters, and scoped to the user. Tool descriptions must instruct the host AI to show the preview and get an explicit user 'yes' before confirming.",
+      "acceptance": ["Token cannot be reused, cannot outlive its TTL, cannot be applied to different parameters.", "Cap and oversell/insufficient-cash guards still fire at preview time.", "Every confirm attempt is logged."]
+    },
+    {
+      "id": "P1-11",
+      "title": "Guardrails at the tool boundary",
+      "depends_on": ["P1-10"],
+      "files": ["trinetra_mcp/guards.py"],
+      "prompt": "Add input validation and output sanitisation on every tool. Validate and clamp all numeric params. Strip or neutralise instruction-like text arriving from news/market data so a poisoned headline in a tool response cannot steer the host AI into a trade. Ensure no secret or file path ever appears in tool output.",
+      "acceptance": ["Injection test cases in tool payloads do not alter behaviour.", "Malformed params return structured errors, never tracebacks."]
+    },
+    {
+      "id": "P1-12",
+      "title": "MCP resources and prompts",
+      "depends_on": ["P1-11"],
+      "files": ["trinetra_mcp/resources.py", "trinetra_mcp/prompts.py"],
+      "prompt": "Expose the portfolio and account status as MCP resources so the host can pull them as context without a tool call. Add MCP prompts for common flows: morning market brief, portfolio health check, 'should I buy X'. This is what makes it feel like a product rather than a tool dump.",
+      "acceptance": ["Resources readable from Claude Desktop.", "Prompts appear and run end-to-end."]
+    },
+    {
+      "id": "P1-13",
+      "title": "Install docs and host configs",
+      "depends_on": ["P1-12"],
+      "files": ["README.md", "docs/INSTALL_MCP.md"],
+      "prompt": "Write copy-paste install instructions for Claude Desktop and ChatGPT Desktop, including the exact JSON config block and the Windows path caveats. Document any behavioural differences between the two hosts that you actually observe in testing. Keep it short enough to follow in five minutes.",
+      "acceptance": ["A person who has never seen the repo can install it from the doc alone."]
+    },
+    {
+      "id": "P1-14",
+      "title": "End-to-end verification",
+      "depends_on": ["P1-13"],
+      "files": ["tests/test_mcp_e2e.py"],
+      "prompt": "Add an offline end-to-end test driving the MCP server through the full ship-criteria journey: setup, research, preview, confirm, portfolio, performance. Then manually run the same journey in Claude Desktop and ChatGPT Desktop and record the result. Confirm the CLI is still green.",
+      "acceptance": ["E2E test passes offline with mocked market data.", "Manual run verified in both hosts.", "All six ship criteria demonstrably met."]
+    }
+  ]
+}

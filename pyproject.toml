@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trinetra-capital-ai"
+version = "1.1.0"
+description = "Agentic research and trading for Indian equities, as an MCP server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Only what the MCP server needs. The LangChain/LangGraph stack used by the
+# legacy interactive CLI lives in requirements.txt and is intentionally not a
+# dependency here — the host AI is the reasoning layer, so the server needs no
+# LLM libraries and no API keys.
+dependencies = [
+    "mcp>=1.2.0",
+    "yfinance",
+    "websockets>=14,<17",
+    "numpy",
+    "pandas",
+    "textblob",
+    "requests",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+cli = [
+    "langchain",
+    "langchain-core",
+    "langgraph",
+    "langgraph-supervisor",
+    "langchain-nvidia-ai-endpoints",
+    "langchain-groq",
+    "langchain-openai",
+    "rich",
+]
+groww = ["growwapi>=1.5.0", "pyotp"]
+dev = ["pytest"]
+
+[project.scripts]
+trinetra-mcp = "trinetra_mcp.server:main"
+
+[tool.setuptools]
+packages = ["trinetra", "trinetra.broker", "trinetra.services", "trinetra_mcp", "trinetra_mcp.tools"]

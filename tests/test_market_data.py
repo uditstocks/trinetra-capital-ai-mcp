@@ -32,7 +32,7 @@ def _offline(monkeypatch):
     # Resolve symbols without the Groww instrument master / network.
     monkeypatch.setattr(market_data, "_inst", lambda s: normalize(s))
     monkeypatch.setattr(market_data, "try_ltp", lambda s: None)
-    monkeypatch.setattr(market_data, "_scrape_headlines", lambda s: [])
+    monkeypatch.setattr(market_data, "_fetch_headlines", lambda inst: [])
     market_data._ltp_cache.clear()
 
 

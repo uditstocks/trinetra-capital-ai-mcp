@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from trinetra.config import settings
+from trinetra.session import SessionContext, default_context
 
 
 class BrokerError(Exception):
@@ -52,7 +52,7 @@ class OrderRequest:
     validity: str = VALIDITY_DAY
     reference_id: str = field(default_factory=new_reference_id)
 
-    def normalised(self) -> "OrderRequest":
+    def normalised(self) -> OrderRequest:
         """Return a validated copy with a bare Groww trading symbol + resolved
         exchange (so "RELIANCE.NS"/"TCS.BO" become "RELIANCE"@NSE / "TCS"@BSE).
         Raises BrokerError on bad input."""
@@ -192,10 +192,22 @@ class Funds:
 
 class Broker(ABC):
     """Abstract broker. Implementations must enforce the order-value safety cap
-    via `guard_order` before sending anything irreversible."""
+    via `guard_order` before sending anything irreversible.
+
+    A broker acts on behalf of exactly one `SessionContext`. Passing `ctx=None`
+    binds it to the process default (the CLI's single-user case), resolved lazily
+    so runtime settings changes are still picked up.
+    """
 
     name: str = "broker"
     mode: str = "paper"
+
+    def __init__(self, ctx: SessionContext | None = None) -> None:
+        self._ctx = ctx
+
+    @property
+    def ctx(self) -> SessionContext:
+        return self._ctx if self._ctx is not None else default_context()
 
     def guard_order(self, req: OrderRequest, reference_price: float | None = None) -> None:
         """Hard ceiling enforced for both paper and live orders.
@@ -206,7 +218,7 @@ class Broker(ABC):
         price lookup would otherwise let an oversized market order skip the cap.
         """
         value = req.estimated_value(reference_price)
-        cap = settings.max_order_value
+        cap = self.ctx.max_order_value
         if not value or value <= 0:
             raise BrokerError(
                 "Cannot determine this order's value — no reference price is "
@@ -219,6 +231,16 @@ class Broker(ABC):
                 f"Order value ₹{value:,.2f} exceeds the safety cap of ₹{cap:,.2f} "
                 f"(GROWW_MAX_ORDER_VALUE). Reduce quantity or raise the cap."
             )
+
+    def validate_order(self, req: OrderRequest, reference_price: float | None = None) -> None:
+        """Run every pre-flight check that can be made without mutating state.
+
+        Raises BrokerError on the first problem. An order preview calls this, and
+        so does the implementation's own place_order, so a preview can never
+        approve something execution would then reject. Subclasses extend it with
+        their own affordability/position rules.
+        """
+        self.guard_order(req.normalised(), reference_price)
 
     @abstractmethod
     def place_order(self, req: OrderRequest, reference_price: float | None = None) -> OrderResult:

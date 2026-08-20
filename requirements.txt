@@ -1,4 +1,9 @@
-# --- Agent framework ---
+# --- MCP server (Claude Desktop / ChatGPT Desktop) ---
+# This is all you need for the MCP server; the agent/LLM packages below are
+# only used by the legacy interactive CLI (python main.py).
+mcp>=1.2.0
+
+# --- Agent framework (CLI only) ---
 langchain
 langchain-core
 langgraph

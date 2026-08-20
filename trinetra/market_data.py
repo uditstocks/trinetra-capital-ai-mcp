@@ -21,9 +21,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import requests
 import yfinance as yf
-from bs4 import BeautifulSoup
 from textblob import TextBlob
 
 from trinetra.config import settings
@@ -371,22 +369,73 @@ def technical_snapshot(symbol: str) -> dict[str, Any]:
     # Prefer the real Groww live price; fall back to yfinance close.
     price = try_ltp(symbol) or round(_last(close), 2)
 
-    headlines = _scrape_headlines(inst.trading_symbol)
+    headlines = _fetch_headlines(inst)
     scores = [TextBlob(h).sentiment.polarity for h in headlines] if headlines else [0.0]
     avg_sent = round(float(np.mean(scores)), 3)
     sent_label = "bullish" if avg_sent > 0.15 else "bearish" if avg_sent < -0.15 else "neutral"
 
+    # Composite score. Each contribution is captured as it is applied so callers
+    # can report exactly how the verdict was reached instead of re-deriving it.
+    breakdown: list[dict[str, Any]] = []
+
+    def _score(indicator: str, value: Any, reading: str, points: int, note: str) -> int:
+        breakdown.append({
+            "indicator": indicator,
+            "value": value,
+            "reading": reading,
+            "points": points,
+            "note": note,
+        })
+        return points
+
     score = 50
-    score += 20 if rsi < 30 else 10 if rsi < 40 else -20 if rsi > 70 else -10 if rsi > 60 else 0
-    score += 15 if histogram > 0 else -15
-    score += 10 if pct_b < 0.2 else -10 if pct_b > 0.8 else 0
-    score += round(avg_sent * 15)
+    if rsi < 30:
+        score += _score("RSI-14", rsi, "oversold", 20,
+                        "Selling looks exhausted — historically a bounce zone.")
+    elif rsi < 40:
+        score += _score("RSI-14", rsi, "leaning oversold", 10,
+                        "Momentum is weak but not yet extreme.")
+    elif rsi > 70:
+        score += _score("RSI-14", rsi, "overbought", -20,
+                        "Buying looks stretched — pullback risk is elevated.")
+    elif rsi > 60:
+        score += _score("RSI-14", rsi, "leaning overbought", -10,
+                        "Momentum is strong but starting to look rich.")
+    else:
+        score += _score("RSI-14", rsi, "neutral", 0,
+                        "Momentum is balanced; no edge either way.")
+
+    if histogram > 0:
+        score += _score("MACD histogram", histogram, "bullish crossover", 15,
+                        "Short-term trend is pulling above the longer-term trend.")
+    else:
+        score += _score("MACD histogram", histogram, "bearish crossover", -15,
+                        "Short-term trend is slipping below the longer-term trend.")
+
+    if pct_b < 0.2:
+        score += _score("Bollinger %B", pct_b, "near lower band", 10,
+                        "Price sits at the cheap end of its recent range.")
+    elif pct_b > 0.8:
+        score += _score("Bollinger %B", pct_b, "near upper band", -10,
+                        "Price is extended against its recent range.")
+    else:
+        score += _score("Bollinger %B", pct_b, "mid-band", 0,
+                        "Price is mid-range — no stretch in either direction.")
+
+    score += _score("News sentiment", avg_sent, sent_label, round(avg_sent * 15),
+                    f"Polarity across {len(headlines)} recent headline(s).")
+
+    raw_score = score
     score = max(0, min(100, score))
 
     action = "BUY" if score >= 65 else "SELL" if score <= 35 else "HOLD"
     confidence = "high" if score >= 80 or score <= 20 else "moderate"
 
     return {
+        "score_base": 50,
+        "score_breakdown": breakdown,
+        "score_raw": raw_score,
+        "headlines": headlines[:5],
         "symbol": inst.trading_symbol,
         "exchange": inst.exchange,
         "price": price,
@@ -408,16 +457,25 @@ def technical_snapshot(symbol: str) -> dict[str, Any]:
     }
 
 
-def _scrape_headlines(symbol: str) -> list[str]:
-    headlines: list[str] = []
+def _fetch_headlines(inst: Instrument) -> list[str]:
+    """Recent headlines for an instrument, via yfinance's news API.
+
+    Replaces an HTML scrape of Yahoo's quote page, which now returns 404 for
+    every ticker. Best-effort throughout: when no headlines are available the
+    sentiment component simply contributes 0 to the composite score rather than
+    failing the analysis.
+    """
     try:
-        url = f"https://finance.yahoo.com/quote/{symbol}/news/"
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup.find_all("h3")[:10]:
-            text = tag.get_text(strip=True)
-            if len(text) > 20:
-                headlines.append(text)
-    except Exception:  # noqa: BLE001 - sentiment is best-effort
-        pass
+        items = yf.Ticker(inst.yf_symbol).news or []
+    except Exception as exc:  # noqa: BLE001 - sentiment is best-effort
+        log.debug("News fetch failed for %s: %s", inst, exc)
+        return []
+
+    headlines: list[str] = []
+    for item in items[:10]:
+        # yfinance returns either a flat dict or {"content": {...}} by version.
+        content = item.get("content") or item
+        title = content.get("title") if isinstance(content, dict) else None
+        if isinstance(title, str) and len(title.strip()) > 20:
+            headlines.append(title.strip())
     return headlines

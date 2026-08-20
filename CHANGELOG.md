@@ -10,6 +10,36 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 
 ## [Unreleased]
 
+### Added — MCP server (use Trinetra from Claude Desktop / ChatGPT Desktop)
+- **`trinetra_mcp` package**: Trinetra is now a Model Context Protocol server, so any
+  MCP-capable AI host can drive it in normal conversation. 12 tools, 3 resources
+  (`trinetra://portfolio`, `://account`, `://performance`) and 3 prompts
+  (`morning_brief`, `portfolio_health`, `should_i_buy`). Runs over stdio, locally —
+  nothing to deploy. Needs **no API keys**: the host is the reasoning layer, so no LLM
+  library is loaded on this path (see `requirements-mcp.txt`).
+- **Two-step orders**: `place_order` only ever returns a priced preview plus a
+  single-use `confirmation_token`; `confirm_order` is the only tool that trades. The
+  validated instruction is held server-side between the two, so the previewed order is
+  exactly the one placed. Tokens expire, are single-use, and are scoped to their user.
+- **Reasoning traces**: `analyze_stock` returns an ordered trace of every indicator
+  checked, what it read, and how many points it contributed to the composite — so the
+  host narrates the real analysis instead of improvising commentary.
+- **Per-user sessions** (`trinetra/session.py`): a `SessionContext` plus per-user
+  storage and an append-only order audit log replace the process-global settings and
+  broker singletons. Trading mode is read from the persisted account record, never from
+  a tool argument, so nothing a host reads can flip a session into live trading.
+- **Shared service layer** (`trinetra/services/`): the CLI's LangChain tools and the MCP
+  tools are both thin adapters over `research` and `trading`, so the two entrypoints
+  cannot drift apart.
+- **Prompt-injection hygiene**: scraped headlines are stripped of instruction-shaped
+  text before appearing in any tool output.
+- `pyproject.toml` (installable, with a `trinetra-mcp` entry point) and
+  [docs/INSTALL_MCP.md](docs/INSTALL_MCP.md).
+
+### Fixed
+- **News sentiment was silently dead**: Yahoo's quote-page scrape returned 404 for every
+  ticker, so the sentiment component always contributed 0. Now uses yfinance's news API.
+
 ### Added — portfolio analytics & discoverability
 - **Realized (booked) P&L** (paper mode): a new `trinetra/analytics.py` replays the
   trade log with the average-cost method to compute booked profit/loss to date —

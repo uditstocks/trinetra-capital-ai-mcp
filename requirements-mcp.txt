@@ -1,0 +1,28 @@
+# Trinetra Capital AI — MCP server only.
+#
+# This is everything needed to run `python -m trinetra_mcp` and use Trinetra from
+# Claude Desktop or ChatGPT Desktop. It deliberately excludes the LangChain /
+# LangGraph / NVIDIA / Groq stack, which only the legacy interactive CLI
+# (`python main.py`) uses — the host AI is the reasoning layer here, so the MCP
+# server needs no LLM libraries and no API keys at all.
+#
+#   pip install -r requirements-mcp.txt
+
+# --- MCP protocol ---
+mcp>=1.2.0
+
+# --- Market data ---
+yfinance
+# yfinance needs websockets >=13 (websockets.asyncio).
+websockets>=14,<17
+
+# --- Technical + sentiment analysis ---
+numpy
+pandas
+textblob
+
+# --- Instrument master download ---
+requests
+
+# --- Config (.env) ---
+python-dotenv
