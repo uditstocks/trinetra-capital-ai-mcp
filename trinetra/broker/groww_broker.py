@@ -114,7 +114,7 @@ class GrowwBroker(Broker):
             # default (NSE), so a BSE order could be capped against the wrong
             # instrument's price.
             reference_price = market_data.try_ltp(f"{req.exchange}_{req.trading_symbol}")
-        self.guard_order(req, reference_price)
+        self.validate_order(req, reference_price)
 
         order_type_const = {
             "MARKET": "MARKET", "LIMIT": "LIMIT",
@@ -217,12 +217,27 @@ class GrowwBroker(Broker):
         return {"order_id": order_id, "status": resp.get("order_status", "modified"), "raw": resp}
 
     def get_order_status(self, order_id: str, segment: str = "CASH") -> dict[str, Any]:
+        """Normalised status, matching what the paper and Zerodha brokers return.
+
+        Groww answers with its own field names; returning them raw would leak the
+        broker's vocabulary to callers that are supposed to be broker-agnostic —
+        and reconciliation would then read a different shape per broker.
+        """
         resp = self._call(
             "get_order_status",
             groww_order_id=order_id,
             segment=self._const("SEGMENT", segment),
         )
-        return resp
+        return {
+            "order_id": order_id,
+            "status": str(resp.get("order_status") or resp.get("status") or "unknown").lower(),
+            "trading_symbol": resp.get("trading_symbol"),
+            "quantity": resp.get("quantity"),
+            "filled_quantity": resp.get("filled_quantity"),
+            "average_price": resp.get("average_price") or resp.get("filled_price"),
+            "message": resp.get("remark") or resp.get("message"),
+            "raw": resp,
+        }
 
     def get_order_history(self, limit: int = 20, segment: str = "CASH") -> list[dict[str, Any]]:
         resp = self._call(

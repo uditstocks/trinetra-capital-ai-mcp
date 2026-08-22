@@ -109,3 +109,15 @@ def test_the_server_image_does_not_ship_the_llm_stack():
         if re.search(r"(?<![-\w])requirements\.txt", line)
     ]
     assert not offenders, f"the Dockerfile pulls in the CLI's dependencies: {offenders}"
+
+
+def test_the_server_ships_the_broker_sdks():
+    """Without these the hosted server cannot place a single real order, and the
+    gap stays invisible until a user's first live trade — which is exactly how it
+    was found."""
+    declared = " ".join(_requirement_lines("requirements-server.txt"))
+    for package in ("growwapi", "pyotp", "kiteconnect"):
+        assert package in declared, (
+            f"{package} missing from requirements-server.txt — live trading would "
+            "fail at the first order with ModuleNotFoundError"
+        )

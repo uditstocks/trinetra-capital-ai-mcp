@@ -219,6 +219,9 @@ def preview_order(
 
         broker = get_broker(ctx)
         broker.validate_order(req, reference_price)
+        # Advisory only — the broker decides, we just make sure the user is not
+        # surprised after approving.
+        account_notes = broker.account_warnings(req, reference_price)
 
         estimated_price = (
             req.price if req.order_type in ("LIMIT", "SL") and req.price
@@ -227,7 +230,7 @@ def preview_order(
         )
         estimated_value = req.estimated_value(reference_price)
 
-        warnings: list[str] = []
+        warnings: list[str] = list(account_notes)
         if req.order_type == "MARKET":
             warnings.append("Market order — the actual fill price may differ from "
                             "this estimate.")
