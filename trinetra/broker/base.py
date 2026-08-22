@@ -250,6 +250,55 @@ class Broker(ABC):
         """
         self.guard_order(req.normalised(), reference_price)
 
+    def account_warnings(
+        self, req: OrderRequest, reference_price: float | None = None
+    ) -> list[str]:
+        """Things worth telling the user before they approve — never a refusal.
+
+        A live order that the broker will reject should not surprise the user
+        after they have approved it. But we must not refuse it ourselves either:
+        our view of buying power is a normalisation across brokers, and real
+        capacity depends on margin, collateral, pledged holdings and T+1
+        settlement that we do not model. Groww, for instance, can legitimately
+        report `clear_cash` as 0 on an account that can still buy — blocking on
+        that would stop a perfectly valid trade.
+
+        So the broker stays the authority and the order still goes through. We
+        only surface what looks off. Only delivery (CNC) is considered; intraday
+        legitimately allows shorting and leverage.
+        """
+        if req.product != PRODUCT_CNC:
+            return []
+
+        try:
+            if req.transaction_type == SELL:
+                held = sum(
+                    h.quantity for h in self.get_holdings()
+                    if h.trading_symbol == req.trading_symbol
+                )
+                if req.quantity > held:
+                    return [
+                        f"Your {self.name} account shows {held} {req.trading_symbol} "
+                        f"in delivery holdings, and this sells {req.quantity}. If "
+                        "some were bought today they may not have settled yet — the "
+                        "broker will decide."
+                    ]
+                return []
+
+            value = req.estimated_value(reference_price)
+            available = self.get_funds().available_cash
+            if value and available and value > available:
+                return [
+                    f"This order is about ₹{value:,.2f} and your {self.name} account "
+                    f"reports ₹{available:,.2f} available. Margin or collateral may "
+                    "still cover it — the broker will decide."
+                ]
+        except BrokerError:
+            # A balance or holdings lookup that fails tells us nothing, and must
+            # not become a warning that reads like a problem with the order.
+            return []
+        return []
+
     @abstractmethod
     def place_order(self, req: OrderRequest, reference_price: float | None = None) -> OrderResult:
         ...

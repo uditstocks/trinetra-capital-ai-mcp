@@ -28,3 +28,12 @@ psycopg[binary]>=3.1,<4
 # --- OAuth token verification ---
 pyjwt[crypto]>=2.8,<3
 cryptography>=42,<48
+
+# --- Broker SDKs ---
+# Only the hosted server places real orders, so these live here rather than in
+# requirements-mcp.txt. Leaving them out is not a degraded experience — it is a
+# server that cannot trade at all, and the failure only shows up the first time
+# a user tries. tests/test_packaging.py and the preflight both check for them.
+growwapi>=1.5,<2
+pyotp>=2.9,<3
+kiteconnect>=5.0,<6

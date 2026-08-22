@@ -164,16 +164,27 @@ def _check_instruments() -> tuple[str, str]:
 
 
 def _check_broker_sdks() -> tuple[str, str]:
+    """A hosted server without these cannot place a single real order.
+
+    Only a warning locally, where paper trading is the whole point — but a hard
+    failure on a server that offers live trading, because the gap is otherwise
+    invisible until a user's first real order.
+    """
+    from trinetra import store
+
     available, missing = [], []
-    for label, module in (("groww", "growwapi"), ("zerodha", "kiteconnect")):
+    for label, module in (("groww", "growwapi"), ("zerodha", "kiteconnect"),
+                          ("groww-totp", "pyotp")):
         try:
             __import__(module)
             available.append(label)
         except ImportError:
             missing.append(label)
     if missing:
-        return WARN, f"available: {available}; NOT installed: {missing}"
-    return PASS, f"both SDKs importable ({', '.join(available)})"
+        if store.database_url() is not None:
+            return FAIL, f"live trading is dead — not installed: {missing}"
+        return WARN, f"available: {available}; not installed: {missing} (paper still works)"
+    return PASS, f"all broker SDKs importable ({', '.join(available)})"
 
 
 EXPECTED_TOOLS = {
